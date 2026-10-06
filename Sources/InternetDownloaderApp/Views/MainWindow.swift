@@ -96,7 +96,11 @@ public struct MainWindow: View {
             }
         }
         .sheet(isPresented: $viewModel.showNewDownloadSheet) {
-            NewDownloadDialog(isPresented: $viewModel.showNewDownloadSheet) { url, filename, folder, segs in
+            NewDownloadDialog(
+                isPresented: $viewModel.showNewDownloadSheet,
+                initialURL: viewModel.clipboardDetectedURL
+            ) { url, filename, folder, segs in
+                viewModel.clipboardDetectedURL = nil
                 viewModel.addNewDownload(url: url, filename: filename, destinationFolder: folder, segments: segs)
             }
         }
@@ -108,7 +112,17 @@ public struct MainWindow: View {
         case .downloading: return viewModel.tasks.filter { $0.status == .downloading || $0.status == .pending }.count
         case .completed: return viewModel.tasks.filter { $0.status == .completed }.count
         case .paused: return viewModel.tasks.filter { $0.status == .paused }.count
+        case .video: return viewModel.tasks.filter { ["mp4", "mkv", "mov", "avi", "webm", "ts", "m3u8"].contains(fileExt($0)) }.count
+        case .audio: return viewModel.tasks.filter { ["mp3", "m4a", "flac", "wav", "aac", "ogg"].contains(fileExt($0)) }.count
+        case .compressed: return viewModel.tasks.filter { ["zip", "rar", "7z", "tar", "gz", "bz2", "xz"].contains(fileExt($0)) }.count
+        case .programs: return viewModel.tasks.filter { ["dmg", "pkg", "iso", "app", "exe"].contains(fileExt($0)) }.count
+        case .documents: return viewModel.tasks.filter { ["pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "txt"].contains(fileExt($0)) }.count
+        case .images: return viewModel.tasks.filter { ["jpg", "jpeg", "png", "gif", "webp", "svg"].contains(fileExt($0)) }.count
         }
+    }
+
+    private func fileExt(_ task: DownloadTask) -> String {
+        URL(fileURLWithPath: task.filename).pathExtension.lowercased()
     }
 
     private func pauseAll() {

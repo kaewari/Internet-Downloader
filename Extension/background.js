@@ -4,12 +4,15 @@ const HOST_NAME = "com.internetdownloader.host";
 
 // Khởi tạo cài đặt mặc định
 chrome.runtime.onInstalled.addListener(() => {
-  chrome.storage.local.get(["interceptDownloads", "showFloatingBar"], (res) => {
+  chrome.storage.local.get(["interceptDownloads", "showFloatingBar", "sniffImages"], (res) => {
     if (res.interceptDownloads === undefined) {
       chrome.storage.local.set({ interceptDownloads: true });
     }
     if (res.showFloatingBar === undefined) {
       chrome.storage.local.set({ showFloatingBar: true });
+    }
+    if (res.sniffImages === undefined) {
+      chrome.storage.local.set({ sniffImages: true });
     }
   });
 
@@ -22,8 +25,20 @@ chrome.runtime.onInstalled.addListener(() => {
 
   chrome.contextMenus.create({
     id: "idm_download_media",
-    title: "Tải video/âm thanh bằng Internet Downloader",
+    title: "Tải video/âm thanh này bằng Internet Downloader",
     contexts: ["video", "audio"]
+  });
+
+  chrome.contextMenus.create({
+    id: "idm_download_image",
+    title: "Tải hình ảnh này bằng Internet Downloader",
+    contexts: ["image"]
+  });
+
+  chrome.contextMenus.create({
+    id: "idm_batch_download",
+    title: "Quét & Tải toàn bộ media trên trang này (Batch Grabber)",
+    contexts: ["page"]
   });
 });
 
@@ -41,6 +56,14 @@ chrome.contextMenus.onClicked.addListener((info, tab) => {
       referrer: tab ? tab.url : "",
       filename: tab && tab.title ? `${tab.title}.mp4` : ""
     });
+  } else if (info.menuItemId === "idm_download_image" && info.srcUrl) {
+    sendDownloadToHost({
+      url: info.srcUrl,
+      referrer: tab ? tab.url : "",
+      filename: ""
+    });
+  } else if (info.menuItemId === "idm_batch_download" && tab && tab.id) {
+    chrome.tabs.sendMessage(tab.id, { action: "open_batch_grabber" });
   }
 });
 
@@ -79,9 +102,23 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true; // Asynchronous response
   }
 
+  if (message.action === "batch_download_items") {
+    const items = message.items || [];
+    for (const item of items) {
+      sendDownloadToHost({
+        url: item.url,
+        filename: item.filename || "",
+        referrer: sender.tab ? sender.tab.url : ""
+      });
+    }
+    sendResponse({ success: true, count: items.length });
+    return true;
+  }
+
   if (message.action === "ping_host") {
     chrome.runtime.sendNativeMessage(HOST_NAME, { action: "ping" }, (response) => {
       if (chrome.runtime.lastError) {
+        // Silently handle error without nagging alert
         sendResponse({ success: false, error: chrome.runtime.lastError.message });
       } else {
         sendResponse({ success: true, response: response });
@@ -103,7 +140,7 @@ function sendDownloadToHost(data, callback) {
 
   chrome.runtime.sendNativeMessage(HOST_NAME, payload, (response) => {
     if (chrome.runtime.lastError) {
-      console.warn("Internet Downloader Host error:", chrome.runtime.lastError.message);
+      // Native host will auto-launch the desktop app silently
       if (callback) callback({ success: false, error: chrome.runtime.lastError.message });
     } else {
       if (callback) callback({ success: true, data: response });

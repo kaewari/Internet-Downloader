@@ -155,7 +155,7 @@ MANIFEST_CONTENT=$(cat <<EOF
   "path": "$HOST_PATH",
   "type": "stdio",
   "allowed_origins": [
-    "chrome-extension://*/"
+    "chrome-extension://nljinpcahdihnlhidjdacnhlchlpblnk/"
   ]
 }
 EOF

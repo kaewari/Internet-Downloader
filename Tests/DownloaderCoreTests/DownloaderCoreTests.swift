@@ -236,4 +236,65 @@ final class DownloaderCoreTests: XCTestCase {
         XCTAssertTrue(dlResp.success)
         XCTAssertEqual(dlResp.taskId, "test-task-1")
     }
+
+    func testCategorizedFolder() {
+        let base = URL(fileURLWithPath: "/tmp/DownloadsTest_\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: base) }
+
+        let videoFolder = DownloadManager.categorizedFolder(for: "movie.mp4", baseFolder: base)
+        XCTAssertEqual(videoFolder.lastPathComponent, "Videos")
+
+        let musicFolder = DownloadManager.categorizedFolder(for: "song.mp3", baseFolder: base)
+        XCTAssertEqual(musicFolder.lastPathComponent, "Audio")
+
+        let zipFolder = DownloadManager.categorizedFolder(for: "archive.zip", baseFolder: base)
+        XCTAssertEqual(zipFolder.lastPathComponent, "Compressed")
+
+        let appFolder = DownloadManager.categorizedFolder(for: "app.dmg", baseFolder: base)
+        XCTAssertEqual(appFolder.lastPathComponent, "Programs")
+
+        let docFolder = DownloadManager.categorizedFolder(for: "report.pdf", baseFolder: base)
+        XCTAssertEqual(docFolder.lastPathComponent, "Documents")
+
+        let imgFolder = DownloadManager.categorizedFolder(for: "photo.jpg", baseFolder: base)
+        XCTAssertEqual(imgFolder.lastPathComponent, "Images")
+    }
+
+    func testDirectSparseFileWriting() throws {
+        let fileManager = FileManager.default
+        let testDir = fileManager.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try fileManager.createDirectory(at: testDir, withIntermediateDirectories: true)
+        defer { try? fileManager.removeItem(at: testDir) }
+
+        let targetFile = testDir.appendingPathComponent("direct_write_test.bin")
+        let totalSize: Int64 = 24 // 24 bytes
+
+        fileManager.createFile(atPath: targetFile.path, contents: nil)
+        let initHandle = try FileHandle(forWritingTo: targetFile)
+        try initHandle.truncate(atOffset: UInt64(totalSize))
+        try initHandle.close()
+
+        // 3 workers writing directly at offsets 0, 8, 16
+        let chunk1 = Data("11111111".utf8)
+        let chunk2 = Data("22222222".utf8)
+        let chunk3 = Data("33333333".utf8)
+
+        let h1 = try FileHandle(forWritingTo: targetFile)
+        try h1.seek(toOffset: 0)
+        try h1.write(contentsOf: chunk1)
+        try h1.close()
+
+        let h3 = try FileHandle(forWritingTo: targetFile)
+        try h3.seek(toOffset: 16)
+        try h3.write(contentsOf: chunk3)
+        try h3.close()
+
+        let h2 = try FileHandle(forWritingTo: targetFile)
+        try h2.seek(toOffset: 8)
+        try h2.write(contentsOf: chunk2)
+        try h2.close()
+
+        let assembled = try Data(contentsOf: targetFile)
+        XCTAssertEqual(String(data: assembled, encoding: .utf8), "111111112222222233333333")
+    }
 }

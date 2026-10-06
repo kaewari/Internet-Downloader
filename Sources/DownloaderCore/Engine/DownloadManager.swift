@@ -116,6 +116,31 @@ public final class DownloadManager: @unchecked Sendable {
         (try? store.getSegments(for: taskId)) ?? []
     }
 
+    public static func categorizedFolder(for filename: String, baseFolder: URL) -> URL {
+        let ext = URL(fileURLWithPath: filename).pathExtension.lowercased()
+        let subfolder: String
+        switch ext {
+        case "mp4", "mkv", "mov", "avi", "webm", "ts", "m3u8":
+            subfolder = "Videos"
+        case "mp3", "m4a", "flac", "wav", "aac", "ogg":
+            subfolder = "Audio"
+        case "zip", "rar", "7z", "tar", "gz", "bz2", "xz":
+            subfolder = "Compressed"
+        case "dmg", "pkg", "iso", "app":
+            subfolder = "Programs"
+        case "pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "txt":
+            subfolder = "Documents"
+        case "jpg", "jpeg", "png", "gif", "webp", "svg":
+            subfolder = "Images"
+        default:
+            return baseFolder
+        }
+
+        let target = baseFolder.appendingPathComponent(subfolder)
+        try? FileManager.default.createDirectory(at: target, withIntermediateDirectories: true)
+        return target
+    }
+
     public func createNewTask(
         url: URL,
         filename: String = "",
@@ -130,10 +155,16 @@ public final class DownloadManager: @unchecked Sendable {
             cleanFilename = url.lastPathComponent.isEmpty ? "download" : url.lastPathComponent
         }
 
+        var finalFolder = destinationFolder
+        let defaultDownloads = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first!
+        if destinationFolder.standardizedFileURL == defaultDownloads.standardizedFileURL {
+            finalFolder = Self.categorizedFolder(for: cleanFilename, baseFolder: defaultDownloads)
+        }
+
         let task = DownloadTask(
             url: url,
             filename: cleanFilename,
-            destinationFolder: destinationFolder,
+            destinationFolder: finalFolder,
             totalBytes: -1,
             downloadedBytes: 0,
             status: .pending,

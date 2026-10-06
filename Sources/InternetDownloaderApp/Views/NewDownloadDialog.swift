@@ -13,9 +13,11 @@ public struct NewDownloadDialog: View {
 
     public init(
         isPresented: Binding<Bool>,
+        initialURL: String? = nil,
         onAdd: @escaping (URL, String, URL, Int) -> Void
     ) {
         self._isPresented = isPresented
+        self._urlString = State(initialValue: initialURL ?? "")
         self.onAdd = onAdd
     }
 
@@ -104,7 +106,11 @@ public struct NewDownloadDialog: View {
         .padding(20)
         .frame(width: 480)
         .onAppear {
-            pasteFromClipboard()
+            if urlString.isEmpty {
+                pasteFromClipboard()
+            } else {
+                autoPopulateFilename(from: urlString)
+            }
         }
     }
 

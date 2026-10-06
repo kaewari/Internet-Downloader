@@ -29,13 +29,56 @@ func writeMessage(_ data: Data) {
     stdout.write(data)
 }
 
+func findAndLaunchDesktopApp() {
+    let selfPath = CommandLine.arguments[0]
+    let appFromHelper = URL(fileURLWithPath: selfPath)
+        .deletingLastPathComponent() // Helpers
+        .deletingLastPathComponent() // Contents
+        .deletingLastPathComponent() // Internet Downloader.app
+        .path
+
+    let candidates = [
+        "/Applications/Internet Downloader.app",
+        appFromHelper,
+        "/Users/hoangson/Projects/Internet-Downloader/dist/Internet Downloader.app"
+    ]
+
+    for path in candidates {
+        if FileManager.default.fileExists(atPath: path) && path.hasSuffix(".app") {
+            let proc = Process()
+            proc.executableURL = URL(fileURLWithPath: "/usr/bin/open")
+            proc.arguments = ["-g", path]
+            try? proc.run()
+            return
+        }
+    }
+}
+
+func sendWithAutoLaunch(client: UnixDomainSocketClient, request: IPCRequest) throws -> IPCResponse {
+    do {
+        return try client.send(request: request)
+    } catch {
+        // App is not running; launch it in the background silently
+        findAndLaunchDesktopApp()
+
+        // Retry connecting for up to 3 seconds (30 x 100ms)
+        for _ in 0..<30 {
+            Thread.sleep(forTimeInterval: 0.1)
+            if let resp = try? client.send(request: request) {
+                return resp
+            }
+        }
+        throw error
+    }
+}
+
 func run() {
     let client = UnixDomainSocketClient()
 
     while let messageData = readMessage() {
         do {
             let request = try JSONDecoder().decode(IPCRequest.self, from: messageData)
-            let response = try client.send(request: request)
+            let response = try sendWithAutoLaunch(client: client, request: request)
             let responseData = try JSONEncoder().encode(response)
             writeMessage(responseData)
         } catch {

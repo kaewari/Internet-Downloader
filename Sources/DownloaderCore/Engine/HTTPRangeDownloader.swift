@@ -19,10 +19,18 @@ public actor HTTPRangeDownloader {
     private let speedTracker = SpeedTracker()
     private var isPaused = false
     private var isCancelled = false
-    private var activeTasks: [Task<Void, Error>] = []
 
-    public init(session: URLSession = .shared) {
-        self.session = session
+    public static func makeOptimizedSession() -> URLSession {
+        let config = URLSessionConfiguration.default
+        config.httpMaximumConnectionsPerHost = 32
+        config.timeoutIntervalForRequest = 60
+        config.timeoutIntervalForResource = 86400
+        config.requestCachePolicy = .reloadIgnoringLocalCacheData
+        return URLSession(configuration: config)
+    }
+
+    public init(session: URLSession? = nil) {
+        self.session = session ?? Self.makeOptimizedSession()
     }
 
     public static func probeURL(
@@ -30,8 +38,9 @@ public actor HTTPRangeDownloader {
         customHeaders: [String: String]? = nil,
         cookies: String? = nil,
         userAgent: String? = nil,
-        session: URLSession = .shared
+        session: URLSession? = nil
     ) async throws -> ProbeResult {
+        let activeSession = session ?? makeOptimizedSession()
         var request = URLRequest(url: url)
         request.httpMethod = "HEAD"
         if let headers = customHeaders {
@@ -44,7 +53,7 @@ public actor HTTPRangeDownloader {
             request.setValue(ua, forHTTPHeaderField: "User-Agent")
         }
 
-        let (_, response) = try await session.data(for: request)
+        let (_, response) = try await activeSession.data(for: request)
         guard let httpResponse = response as? HTTPURLResponse else {
             throw URLError(.badServerResponse)
         }
@@ -64,7 +73,7 @@ public actor HTTPRangeDownloader {
                 getRequest.setValue(ua, forHTTPHeaderField: "User-Agent")
             }
 
-            let (_, getResponse) = try await session.data(for: getRequest)
+            let (_, getResponse) = try await activeSession.data(for: getRequest)
             if let getHTTP = getResponse as? HTTPURLResponse {
                 return parseHeaders(from: getHTTP, url: url)
             }
@@ -76,7 +85,6 @@ public actor HTTPRangeDownloader {
     private static func parseHeaders(from response: HTTPURLResponse, url: URL) -> ProbeResult {
         let headers = response.allHeaderFields
 
-        // Check accept ranges
         var acceptRanges = false
         if let accept = headers["Accept-Ranges"] as? String, accept.lowercased().contains("bytes") {
             acceptRanges = true
@@ -84,7 +92,6 @@ public actor HTTPRangeDownloader {
             acceptRanges = true
         }
 
-        // Check Content-Range for total length if 206
         var totalBytes: Int64 = response.expectedContentLength
         if let contentRange = headers["Content-Range"] as? String {
             acceptRanges = true
@@ -186,9 +193,20 @@ public actor HTTPRangeDownloader {
         speedTracker.reset()
 
         let fileManager = FileManager.default
-        let tempDir = task.tempDirectory
-        if !fileManager.fileExists(atPath: tempDir.path) {
-            try fileManager.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        let destDir = task.destinationFolder
+        if !fileManager.fileExists(atPath: destDir.path) {
+            try fileManager.createDirectory(at: destDir, withIntermediateDirectories: true)
+        }
+
+        // Direct sparse file allocation on APFS: pre-allocate total size instantly
+        let targetFile = task.finalFilePath
+        if !fileManager.fileExists(atPath: targetFile.path) {
+            fileManager.createFile(atPath: targetFile.path, contents: nil)
+            if task.totalBytes > 0 {
+                let initHandle = try FileHandle(forWritingTo: targetFile)
+                try initHandle.truncate(atOffset: UInt64(task.totalBytes))
+                try initHandle.close()
+            }
         }
 
         var updatedSegments = segments
@@ -196,55 +214,35 @@ public actor HTTPRangeDownloader {
         try await withThrowingTaskGroup(of: DownloadSegment.self) { group in
             for segment in updatedSegments {
                 group.addTask { [self] in
-                    try await self.downloadSegment(
+                    try await self.downloadSegmentDirect(
                         segment: segment,
                         task: task,
-                        tempDir: tempDir,
+                        targetFile: targetFile,
                         onProgress: onProgress,
                         onSegmentUpdate: onSegmentUpdate
                     )
                 }
             }
 
-            var results: [DownloadSegment] = []
             for try await completedSeg in group {
-                results.append(completedSeg)
                 if let idx = updatedSegments.firstIndex(where: { $0.id == completedSeg.id }) {
                     updatedSegments[idx] = completedSeg
                 }
             }
-
-            // Assemble file
-            let assembler = FileAssembler()
-            try assembler.assemble(
-                segments: results,
-                tempDirectory: tempDir,
-                destinationFile: task.finalFilePath,
-                expectedTotalBytes: task.totalBytes
-            )
         }
+
+        // Clean up temporary checkpoint directory if any
+        try? fileManager.removeItem(at: task.tempDirectory)
     }
 
-    private func downloadSegment(
+    private func downloadSegmentDirect(
         segment: DownloadSegment,
         task: DownloadTask,
-        tempDir: URL,
+        targetFile: URL,
         onProgress: @escaping @Sendable (Int64, Double) -> Void,
         onSegmentUpdate: @escaping @Sendable (DownloadSegment) -> Void
     ) async throws -> DownloadSegment {
         var currentSegment = segment
-        let partFile = currentSegment.tempFile(in: tempDir)
-        let fileManager = FileManager.default
-
-        // Check existing file part for resume
-        var existingBytes: Int64 = 0
-        if fileManager.fileExists(atPath: partFile.path) {
-            let attrs = try fileManager.attributesOfItem(atPath: partFile.path)
-            existingBytes = (attrs[.size] as? NSNumber)?.int64Value ?? 0
-        } else {
-            fileManager.createFile(atPath: partFile.path, contents: nil)
-        }
-        currentSegment.downloadedBytes = existingBytes
 
         if currentSegment.expectedBytes > 0 && currentSegment.downloadedBytes >= currentSegment.expectedBytes {
             currentSegment.status = .completed
@@ -267,9 +265,11 @@ public actor HTTPRangeDownloader {
         currentSegment.status = .downloading
         onSegmentUpdate(currentSegment)
 
-        let handle = try FileHandle(forWritingTo: partFile)
+        let handle = try FileHandle(forWritingTo: targetFile)
         defer { try? handle.close() }
-        try handle.seekToEnd()
+
+        let targetOffset = UInt64(currentSegment.startByte + currentSegment.downloadedBytes)
+        try handle.seek(toOffset: targetOffset)
 
         let (bytes, response) = try await session.bytes(for: request)
         guard let httpResponse = response as? HTTPURLResponse else {
@@ -277,19 +277,25 @@ public actor HTTPRangeDownloader {
         }
 
         if task.acceptRanges && httpResponse.statusCode != 206 && currentSegment.downloadedBytes > 0 {
-            // Server did not honor range for resume, restart segment
-            try handle.truncate(atOffset: 0)
             currentSegment.downloadedBytes = 0
+            try handle.seek(toOffset: UInt64(currentSegment.startByte))
         }
 
+        // High-performance batched chunk streaming (64KB buffer)
         var buffer = Data()
         buffer.reserveCapacity(65536)
+        var unrecordedBytes: Int64 = 0
 
         for try await byte in bytes {
             if isPaused || isCancelled {
                 if !buffer.isEmpty {
                     try handle.write(contentsOf: buffer)
+                    currentSegment.downloadedBytes += Int64(buffer.count)
+                    unrecordedBytes += Int64(buffer.count)
                     buffer.removeAll(keepingCapacity: true)
+                }
+                if unrecordedBytes > 0 {
+                    speedTracker.record(bytes: unrecordedBytes)
                 }
                 currentSegment.status = .paused
                 onSegmentUpdate(currentSegment)
@@ -297,21 +303,37 @@ public actor HTTPRangeDownloader {
             }
 
             buffer.append(byte)
-            currentSegment.downloadedBytes += 1
-            speedTracker.record(bytes: 1)
 
             if buffer.count >= 65536 {
                 try handle.write(contentsOf: buffer)
+                let count = Int64(buffer.count)
+                currentSegment.downloadedBytes += count
+                unrecordedBytes += count
                 buffer.removeAll(keepingCapacity: true)
-                let speed = speedTracker.currentSpeed()
-                onProgress(currentSegment.downloadedBytes, speed)
-                onSegmentUpdate(currentSegment)
+
+                // Update speed stats once every 256KB to minimize mutex contention
+                if unrecordedBytes >= 262144 {
+                    speedTracker.record(bytes: unrecordedBytes)
+                    unrecordedBytes = 0
+                    let speed = speedTracker.currentSpeed()
+                    onProgress(currentSegment.downloadedBytes, speed)
+                    onSegmentUpdate(currentSegment)
+                }
             }
         }
 
         if !buffer.isEmpty {
             try handle.write(contentsOf: buffer)
+            let count = Int64(buffer.count)
+            currentSegment.downloadedBytes += count
+            unrecordedBytes += count
             buffer.removeAll(keepingCapacity: true)
+        }
+
+        if unrecordedBytes > 0 {
+            speedTracker.record(bytes: unrecordedBytes)
+            let speed = speedTracker.currentSpeed()
+            onProgress(currentSegment.downloadedBytes, speed)
         }
 
         currentSegment.status = .completed
