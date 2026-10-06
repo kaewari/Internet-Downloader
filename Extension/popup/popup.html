@@ -1,0 +1,144 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+  <meta charset="UTF-8">
+  <title>Internet Downloader</title>
+  <style>
+    body {
+      width: 280px;
+      margin: 0;
+      padding: 14px;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      font-size: 13px;
+      background: #1c1c1e;
+      color: #f2f2f7;
+    }
+    .header {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 12px;
+      padding-bottom: 8px;
+      border-bottom: 1px solid #2c2c2e;
+    }
+    .title {
+      font-size: 14px;
+      font-weight: 600;
+    }
+    .status-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 4px 8px;
+      border-radius: 4px;
+      font-size: 11px;
+      font-weight: 500;
+      margin-bottom: 12px;
+      background: #2c2c2e;
+    }
+    .status-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: #8e8e93;
+    }
+    .status-dot.online { background: #30d158; }
+    .status-dot.offline { background: #ff453a; }
+
+    .toggle-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 8px 0;
+      border-bottom: 1px solid #2c2c2e;
+    }
+    .toggle-label {
+      font-size: 12px;
+      color: #d1d1d6;
+    }
+    .toggle-switch {
+      position: relative;
+      display: inline-block;
+      width: 36px;
+      height: 20px;
+    }
+    .toggle-switch input {
+      opacity: 0;
+      width: 0;
+      height: 0;
+    }
+    .slider {
+      position: absolute;
+      cursor: pointer;
+      top: 0; left: 0; right: 0; bottom: 0;
+      background-color: #3a3a3c;
+      transition: .3s;
+      border-radius: 20px;
+    }
+    .slider:before {
+      position: absolute;
+      content: "";
+      height: 14px;
+      width: 14px;
+      left: 3px;
+      bottom: 3px;
+      background-color: white;
+      transition: .3s;
+      border-radius: 50%;
+    }
+    input:checked + .slider {
+      background-color: #0a84ff;
+    }
+    input:checked + .slider:before {
+      transform: translateX(16px);
+    }
+    .btn-ping {
+      width: 100%;
+      margin-top: 14px;
+      padding: 8px;
+      background: #0a84ff;
+      color: white;
+      border: none;
+      border-radius: 6px;
+      font-weight: 500;
+      cursor: pointer;
+      font-size: 12px;
+      transition: background 0.2s;
+    }
+    .btn-ping:hover {
+      background: #0071e3;
+    }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <span style="font-size: 18px;">⬇</span>
+    <span class="title">Internet Downloader</span>
+  </div>
+
+  <div class="status-badge" id="statusBadge">
+    <span class="status-dot" id="statusDot"></span>
+    <span id="statusText">Đang kiểm tra kết nối...</span>
+  </div>
+
+  <div class="toggle-row">
+    <span class="toggle-label">Tự động bắt link tải file</span>
+    <label class="toggle-switch">
+      <input type="checkbox" id="toggleDownloads" checked>
+      <span class="slider"></span>
+    </label>
+  </div>
+
+  <div class="toggle-row">
+    <span class="toggle-label">Thanh tải video trên web</span>
+    <label class="toggle-switch">
+      <input type="checkbox" id="toggleFloating" checked>
+      <span class="slider"></span>
+    </label>
+  </div>
+
+  <button class="btn-ping" id="btnPing">Kiểm tra kết nối App</button>
+
+  <script src="popup.js"></script>
+</body>
+</html>

@@ -1,0 +1,55 @@
+/* Floating Media Sniffer Bar - Internet Downloader */
+
+.idm-floating-bar {
+  position: absolute;
+  z-index: 2147483647;
+  display: flex;
+  align-items: center;
+  background: rgba(18, 18, 22, 0.88);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.35);
+  border-radius: 6px;
+  padding: 6px 10px;
+  cursor: pointer;
+  user-select: none;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  font-size: 12px;
+  font-weight: 500;
+  color: #ffffff;
+  transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.idm-floating-bar:hover {
+  background: rgba(10, 132, 255, 0.95);
+  border-color: rgba(255, 255, 255, 0.3);
+  transform: translateY(-1px);
+  box-shadow: 0 6px 20px rgba(10, 132, 255, 0.4);
+}
+
+.idm-btn-content {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.idm-icon {
+  width: 14px;
+  height: 14px;
+  color: #30d158;
+  transition: transform 0.2s ease;
+}
+
+.idm-floating-bar:hover .idm-icon {
+  color: #ffffff;
+  transform: translateY(1px);
+}
+
+.idm-floating-bar.idm-downloading {
+  background: rgba(48, 209, 88, 0.95);
+}
+
+.idm-floating-bar.idm-downloading .idm-icon {
+  color: #ffffff;
+}
