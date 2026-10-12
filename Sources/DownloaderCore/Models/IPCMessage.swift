@@ -7,7 +7,10 @@ public struct IPCRequest: Codable, Sendable {
     public let referrer: String?
     public let cookies: String?
     public let userAgent: String?
+    public let headers: [String: String]?
     public let taskId: String?
+    public let protocolVersion: Int?
+    public let browser: BrowserCommand?
 
     public init(
         action: String,
@@ -16,7 +19,10 @@ public struct IPCRequest: Codable, Sendable {
         referrer: String? = nil,
         cookies: String? = nil,
         userAgent: String? = nil,
-        taskId: String? = nil
+        headers: [String: String]? = nil,
+        taskId: String? = nil,
+        protocolVersion: Int? = nil,
+        browser: BrowserCommand? = nil
     ) {
         self.action = action
         self.url = url
@@ -24,7 +30,10 @@ public struct IPCRequest: Codable, Sendable {
         self.referrer = referrer
         self.cookies = cookies
         self.userAgent = userAgent
+        self.headers = headers
         self.taskId = taskId
+        self.protocolVersion = protocolVersion
+        self.browser = browser
     }
 }
 

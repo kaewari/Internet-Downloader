@@ -3,6 +3,7 @@ import DownloaderCore
 
 public struct MainWindow: View {
     @ObservedObject public var viewModel: DownloadManagerViewModel
+    @State private var taskForRefreshAddress: DownloadTask? = nil
 
     public init(viewModel: DownloadManagerViewModel) {
         self.viewModel = viewModel
@@ -54,7 +55,8 @@ public struct MainWindow: View {
                                 onResume: { viewModel.resumeTask(task.id) },
                                 onDelete: { viewModel.deleteTask(task.id) },
                                 onOpen: { viewModel.openFile(task) },
-                                onReveal: { viewModel.revealInFinder(task) }
+                                onReveal: { viewModel.revealInFinder(task) },
+                                onRefreshAddress: { taskForRefreshAddress = task }
                             )
                             .contentShape(Rectangle())
                             .onTapGesture {
@@ -92,6 +94,12 @@ public struct MainWindow: View {
                         Label("Tiếp tục tất cả", systemImage: "play.circle")
                     }
                     .help("Tiếp tục tất cả tác vụ")
+
+                    Button(action: { viewModel.clearFailedTasks() }) {
+                        Label("Dọn dẹp lỗi", systemImage: "trash.slash")
+                    }
+                    .help("Dọn dẹp tất cả các tác vụ tải bị lỗi")
+                    .disabled(viewModel.tasks.filter { $0.status == .failed }.isEmpty)
                 }
             }
         }
@@ -104,6 +112,28 @@ public struct MainWindow: View {
                 viewModel.addNewDownload(url: url, filename: filename, destinationFolder: folder, segments: segs)
             }
         }
+        .sheet(item: $taskForRefreshAddress) { task in
+            RefreshAddressDialog(
+                isPresented: Binding(
+                    get: { taskForRefreshAddress != nil },
+                    set: { if !$0 { taskForRefreshAddress = nil } }
+                ),
+                task: task
+            ) { newURL, newReferrer in
+                viewModel.updateTaskURL(taskId: task.id, newURL: newURL, newReferrer: newReferrer)
+            }
+        }
+        .sheet(item: $viewModel.pendingConfirmationTask) { task in
+            DownloadConfirmationDialog(
+                task: task,
+                onStart: { filename, folder, segs, probedSize in
+                    viewModel.confirmAndStartTask(taskId: task.id, filename: filename, destinationFolder: folder, segments: segs, totalBytes: probedSize)
+                },
+                onCancel: {
+                    viewModel.cancelPendingConfirmation(task.id)
+                }
+            )
+        }
     }
 
     private func count(for category: DownloadCategory) -> Int {
@@ -112,6 +142,7 @@ public struct MainWindow: View {
         case .downloading: return viewModel.tasks.filter { $0.status == .downloading || $0.status == .pending }.count
         case .completed: return viewModel.tasks.filter { $0.status == .completed }.count
         case .paused: return viewModel.tasks.filter { $0.status == .paused }.count
+        case .failed: return viewModel.tasks.filter { $0.status == .failed }.count
         case .video: return viewModel.tasks.filter { ["mp4", "mkv", "mov", "avi", "webm", "ts", "m3u8"].contains(fileExt($0)) }.count
         case .audio: return viewModel.tasks.filter { ["mp3", "m4a", "flac", "wav", "aac", "ogg"].contains(fileExt($0)) }.count
         case .compressed: return viewModel.tasks.filter { ["zip", "rar", "7z", "tar", "gz", "bz2", "xz"].contains(fileExt($0)) }.count

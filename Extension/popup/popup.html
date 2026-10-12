@@ -5,7 +5,7 @@
   <title>Internet Downloader</title>
   <style>
     body {
-      width: 290px;
+      width: 310px;
       margin: 0;
       padding: 14px;
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
@@ -44,6 +44,93 @@
     }
     .status-dot.online { background: #30d158; }
     .status-dot.offline { background: #ff9f0a; }
+
+    /* Media List Section */
+    .media-section {
+      margin-bottom: 12px;
+      background: #252528;
+      border: 1px solid #333336;
+      border-radius: 8px;
+      overflow: hidden;
+    }
+    .media-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 7px 10px;
+      background: #2c2c2e;
+      font-size: 11px;
+      font-weight: 600;
+      color: #aeaeb2;
+    }
+    .media-count-badge {
+      background: #0a84ff;
+      color: white;
+      font-size: 10px;
+      padding: 1px 6px;
+      border-radius: 10px;
+      font-weight: 700;
+    }
+    .media-list {
+      max-height: 140px;
+      overflow-y: auto;
+      padding: 6px;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+    .media-empty {
+      padding: 10px;
+      text-align: center;
+      font-size: 11px;
+      color: #8e8e93;
+    }
+    .media-item {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      padding: 6px 8px;
+      background: #1c1c1e;
+      border-radius: 6px;
+      border: 1px solid #3a3a3c;
+    }
+    .media-info {
+      flex: 1;
+      min-width: 0;
+    }
+    .media-name {
+      font-size: 11px;
+      font-weight: 500;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      color: #f2f2f7;
+    }
+    .media-sub {
+      font-size: 9px;
+      color: #8e8e93;
+      text-transform: uppercase;
+    }
+    .btn-dl-item {
+      padding: 4px 8px;
+      background: #30d158;
+      color: #ffffff;
+      border: none;
+      border-radius: 4px;
+      font-size: 11px;
+      font-weight: 600;
+      cursor: pointer;
+      flex-shrink: 0;
+      transition: background 0.15s;
+    }
+    .btn-dl-item:hover {
+      background: #28cd41;
+    }
+    .btn-dl-item:disabled {
+      background: #545458;
+      cursor: default;
+    }
 
     .toggle-row {
       display: flex;
@@ -128,6 +215,17 @@
     <span id="statusText">Tự động kết nối macOS App</span>
   </div>
 
+  <!-- Media phát hiện trên trang hiện tại -->
+  <div class="media-section">
+    <div class="media-header">
+      <span class="media-title">Media phát hiện trên trang</span>
+      <span class="media-count-badge" id="mediaCountBadge">0</span>
+    </div>
+    <div class="media-list" id="mediaList">
+      <div class="media-empty">Chưa có luồng media nào đang phát</div>
+    </div>
+  </div>
+
   <div class="toggle-row">
     <span class="toggle-label">Tự động bắt link tải file</span>
     <label class="toggle-switch">
@@ -155,6 +253,10 @@
   <button class="btn-action" id="btnBatchGrabber">🔍 Quét media trang này (Batch Grabber)</button>
   <button class="btn-action btn-secondary" id="btnPing">Đồng bộ với Desktop App</button>
 
+  <button class="btn-action" id="btnBrowserSave">Chọn attachment / Save trong tab</button>
+  <div id="browserSelections" class="media-list"></div>
+  <div id="browserConfirmations" class="media-list"></div>
   <script src="popup.js"></script>
+  <script src="browser-popup.js"></script>
 </body>
 </html>

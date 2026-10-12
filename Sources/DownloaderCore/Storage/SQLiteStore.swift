@@ -18,6 +18,7 @@ public final class SQLiteStore: @unchecked Sendable {
         }
         self.db = dbPointer
         try createTables()
+        try migrateSchema()
     }
 
     deinit {
@@ -42,12 +43,15 @@ public final class SQLiteStore: @unchecked Sendable {
             last_modified TEXT,
             accept_ranges INTEGER NOT NULL,
             segments_count INTEGER NOT NULL,
+            downloaded_segments_count INTEGER DEFAULT 0,
             error_message TEXT,
             created_at REAL NOT NULL,
             updated_at REAL NOT NULL,
             referrer TEXT,
             user_agent TEXT,
-            cookies TEXT
+            cookies TEXT,
+            browser_info TEXT,
+            headers TEXT
         );
 
         CREATE TABLE IF NOT EXISTS segments (
@@ -73,14 +77,43 @@ public final class SQLiteStore: @unchecked Sendable {
         }
     }
 
+    private func migrateSchema() throws {
+        try queue.sync {
+            var stmt: OpaquePointer?
+            guard sqlite3_prepare_v2(db, "PRAGMA table_info(tasks)", -1, &stmt, nil) == SQLITE_OK else { throw NSError(domain: "SQLiteStore", code: 12) }
+            var foundBrowser = false
+            var foundSegments = false
+            var foundHeaders = false
+            while sqlite3_step(stmt) == SQLITE_ROW {
+                if let text = sqlite3_column_text(stmt, 1) {
+                    let col = String(cString: text)
+                    if col == "browser_info" { foundBrowser = true }
+                    if col == "downloaded_segments_count" { foundSegments = true }
+                    if col == "headers" { foundHeaders = true }
+                }
+            }
+            sqlite3_finalize(stmt)
+            if !foundBrowser && sqlite3_exec(db, "ALTER TABLE tasks ADD COLUMN browser_info TEXT", nil, nil, nil) != SQLITE_OK {
+                throw NSError(domain: "SQLiteStore", code: 13)
+            }
+            if !foundSegments && sqlite3_exec(db, "ALTER TABLE tasks ADD COLUMN downloaded_segments_count INTEGER DEFAULT 0", nil, nil, nil) != SQLITE_OK {
+                throw NSError(domain: "SQLiteStore", code: 14)
+            }
+            if !foundHeaders && sqlite3_exec(db, "ALTER TABLE tasks ADD COLUMN headers TEXT", nil, nil, nil) != SQLITE_OK {
+                throw NSError(domain: "SQLiteStore", code: 15)
+            }
+        }
+    }
+
     public func saveTask(_ task: DownloadTask) throws {
         try queue.sync {
             let sql = """
             INSERT INTO tasks (
                 id, url, filename, destination_folder, total_bytes, downloaded_bytes,
                 status, speed, etag, last_modified, accept_ranges, segments_count,
-                error_message, created_at, updated_at, referrer, user_agent, cookies
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                error_message, created_at, updated_at, referrer, user_agent, cookies, browser_info,
+                downloaded_segments_count, headers
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET
                 total_bytes=excluded.total_bytes,
                 downloaded_bytes=excluded.downloaded_bytes,
@@ -90,8 +123,12 @@ public final class SQLiteStore: @unchecked Sendable {
                 last_modified=excluded.last_modified,
                 accept_ranges=excluded.accept_ranges,
                 segments_count=excluded.segments_count,
+                downloaded_segments_count=excluded.downloaded_segments_count,
                 error_message=excluded.error_message,
-                updated_at=excluded.updated_at;
+                updated_at=excluded.updated_at,
+                url=excluded.url, filename=excluded.filename, destination_folder=excluded.destination_folder,
+                referrer=excluded.referrer, user_agent=excluded.user_agent, cookies=excluded.cookies,
+                browser_info=excluded.browser_info, headers=excluded.headers;
             """
             var stmt: OpaquePointer?
             guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else {
@@ -148,6 +185,16 @@ public final class SQLiteStore: @unchecked Sendable {
                 sqlite3_bind_null(stmt, 18)
             }
 
+            if let info = task.browserInfo {
+                let encoded = String(data: try JSONEncoder().encode(info), encoding: .utf8)!
+                sqlite3_bind_text(stmt, 19, (encoded as NSString).utf8String, -1, unsafeBitCast(-1, to: sqlite3_destructor_type.self))
+            } else { sqlite3_bind_null(stmt, 19) }
+            sqlite3_bind_int(stmt, 20, Int32(task.downloadedSegmentsCount))
+
+            if let headers = task.headers, let encoded = try? JSONEncoder().encode(headers), let str = String(data: encoded, encoding: .utf8) {
+                sqlite3_bind_text(stmt, 21, (str as NSString).utf8String, -1, unsafeBitCast(-1, to: sqlite3_destructor_type.self))
+            } else { sqlite3_bind_null(stmt, 21) }
+
             if sqlite3_step(stmt) != SQLITE_DONE {
                 throw NSError(domain: "SQLiteStore", code: 4, userInfo: [NSLocalizedDescriptionKey: String(cString: sqlite3_errmsg(db))])
             }
@@ -156,7 +203,7 @@ public final class SQLiteStore: @unchecked Sendable {
 
     public func getAllTasks() throws -> [DownloadTask] {
         try queue.sync {
-            let sql = "SELECT id, url, filename, destination_folder, total_bytes, downloaded_bytes, status, speed, etag, last_modified, accept_ranges, segments_count, error_message, created_at, updated_at, referrer, user_agent, cookies FROM tasks ORDER BY created_at DESC;"
+            let sql = "SELECT id, url, filename, destination_folder, total_bytes, downloaded_bytes, status, speed, etag, last_modified, accept_ranges, segments_count, error_message, created_at, updated_at, referrer, user_agent, cookies, browser_info, downloaded_segments_count, headers FROM tasks ORDER BY created_at DESC;"
             var stmt: OpaquePointer?
             guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else {
                 throw NSError(domain: "SQLiteStore", code: 5, userInfo: [NSLocalizedDescriptionKey: String(cString: sqlite3_errmsg(db))])
@@ -189,8 +236,9 @@ public final class SQLiteStore: @unchecked Sendable {
                 let referrer = sqlite3_column_text(stmt, 15).map { String(cString: $0) }
                 let userAgent = sqlite3_column_text(stmt, 16).map { String(cString: $0) }
                 let cookies = sqlite3_column_text(stmt, 17).map { String(cString: $0) }
+                let downloadedSegmentsCount = Int(sqlite3_column_int(stmt, 19))
 
-                let task = DownloadTask(
+                var task = DownloadTask(
                     id: id,
                     url: url,
                     filename: filename,
@@ -203,6 +251,7 @@ public final class SQLiteStore: @unchecked Sendable {
                     lastModified: lastModified,
                     acceptRanges: acceptRanges,
                     segmentsCount: segmentsCount,
+                    downloadedSegmentsCount: downloadedSegmentsCount,
                     errorMessage: errorMessage,
                     createdAt: createdAt,
                     updatedAt: updatedAt,
@@ -210,6 +259,12 @@ public final class SQLiteStore: @unchecked Sendable {
                     userAgent: userAgent,
                     cookies: cookies
                 )
+                if let text = sqlite3_column_text(stmt, 18) {
+                    task.browserInfo = try JSONDecoder().decode(BrowserTaskInfo.self, from: Data(String(cString: text).utf8))
+                }
+                if let text = sqlite3_column_text(stmt, 20) {
+                    task.headers = try? JSONDecoder().decode([String: String].self, from: Data(String(cString: text).utf8))
+                }
                 tasks.append(task)
             }
             return tasks
@@ -218,7 +273,7 @@ public final class SQLiteStore: @unchecked Sendable {
 
     public func getTask(id: UUID) throws -> DownloadTask? {
         try queue.sync {
-            let sql = "SELECT id, url, filename, destination_folder, total_bytes, downloaded_bytes, status, speed, etag, last_modified, accept_ranges, segments_count, error_message, created_at, updated_at, referrer, user_agent, cookies FROM tasks WHERE id = ? LIMIT 1;"
+            let sql = "SELECT id, url, filename, destination_folder, total_bytes, downloaded_bytes, status, speed, etag, last_modified, accept_ranges, segments_count, error_message, created_at, updated_at, referrer, user_agent, cookies, browser_info, downloaded_segments_count, headers FROM tasks WHERE id = ? LIMIT 1;"
             var stmt: OpaquePointer?
             guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else {
                 throw NSError(domain: "SQLiteStore", code: 6, userInfo: [NSLocalizedDescriptionKey: String(cString: sqlite3_errmsg(db))])
@@ -252,8 +307,9 @@ public final class SQLiteStore: @unchecked Sendable {
             let referrer = sqlite3_column_text(stmt, 15).map { String(cString: $0) }
             let userAgent = sqlite3_column_text(stmt, 16).map { String(cString: $0) }
             let cookies = sqlite3_column_text(stmt, 17).map { String(cString: $0) }
+            let downloadedSegmentsCount = Int(sqlite3_column_int(stmt, 19))
 
-            return DownloadTask(
+            var task = DownloadTask(
                 id: id,
                 url: url,
                 filename: filename,
@@ -266,6 +322,7 @@ public final class SQLiteStore: @unchecked Sendable {
                 lastModified: lastModified,
                 acceptRanges: acceptRanges,
                 segmentsCount: segmentsCount,
+                downloadedSegmentsCount: downloadedSegmentsCount,
                 errorMessage: errorMessage,
                 createdAt: createdAt,
                 updatedAt: updatedAt,
@@ -273,6 +330,13 @@ public final class SQLiteStore: @unchecked Sendable {
                 userAgent: userAgent,
                 cookies: cookies
             )
+            if let text = sqlite3_column_text(stmt, 18) {
+                task.browserInfo = try JSONDecoder().decode(BrowserTaskInfo.self, from: Data(String(cString: text).utf8))
+            }
+            if let text = sqlite3_column_text(stmt, 20) {
+                task.headers = try? JSONDecoder().decode([String: String].self, from: Data(String(cString: text).utf8))
+            }
+            return task
         }
     }
 
@@ -289,6 +353,28 @@ public final class SQLiteStore: @unchecked Sendable {
             sqlite3_bind_text(stmt, 1, (idStr as NSString).utf8String, -1, nil)
             if sqlite3_step(stmt) != SQLITE_DONE {
                 throw NSError(domain: "SQLiteStore", code: 8, userInfo: [NSLocalizedDescriptionKey: String(cString: sqlite3_errmsg(db))])
+            }
+        }
+    }
+
+    public func deleteFailedTasks() throws {
+        try queue.sync {
+            let deleteSegmentsSql = "DELETE FROM segments WHERE task_id IN (SELECT id FROM tasks WHERE status = 'failed');"
+            var segStmt: OpaquePointer?
+            if sqlite3_prepare_v2(db, deleteSegmentsSql, -1, &segStmt, nil) == SQLITE_OK {
+                _ = sqlite3_step(segStmt)
+                sqlite3_finalize(segStmt)
+            }
+
+            let sql = "DELETE FROM tasks WHERE status = 'failed';"
+            var stmt: OpaquePointer?
+            guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else {
+                throw NSError(domain: "SQLiteStore", code: 14, userInfo: [NSLocalizedDescriptionKey: String(cString: sqlite3_errmsg(db))])
+            }
+            defer { sqlite3_finalize(stmt) }
+
+            if sqlite3_step(stmt) != SQLITE_DONE {
+                throw NSError(domain: "SQLiteStore", code: 15, userInfo: [NSLocalizedDescriptionKey: String(cString: sqlite3_errmsg(db))])
             }
         }
     }

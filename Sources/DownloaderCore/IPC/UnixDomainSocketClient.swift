@@ -42,42 +42,8 @@ public final class UnixDomainSocketClient: Sendable {
             throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .ECONNREFUSED)
         }
 
-        // Encode and send payload
-        let reqData = try JSONEncoder().encode(request)
-        var len = UInt32(reqData.count).bigEndian
-        _ = write(fd, &len, 4)
-        _ = reqData.withUnsafeBytes { rawPtr in
-            write(fd, rawPtr.baseAddress!, reqData.count)
-        }
-
-        // Read response length prefix
-        var respLenBuf = UInt32(0)
-        let bytesRead = read(fd, &respLenBuf, 4)
-        guard bytesRead == 4 else {
-            throw NSError(domain: "IPCClient", code: 2, userInfo: [NSLocalizedDescriptionKey: "Failed to read response length"])
-        }
-
-        let respLength = Int(UInt32(bigEndian: respLenBuf))
-        guard respLength > 0 && respLength <= 10 * 1024 * 1024 else {
-            throw NSError(domain: "IPCClient", code: 3, userInfo: [NSLocalizedDescriptionKey: "Invalid response size: \(respLength)"])
-        }
-
-        var respData = Data(count: respLength)
-        var totalRead = 0
-        let readSuccess = respData.withUnsafeMutableBytes { (rawPtr: UnsafeMutableRawBufferPointer) -> Bool in
-            guard let baseAddress = rawPtr.baseAddress else { return false }
-            while totalRead < respLength {
-                let r = read(fd, baseAddress.advanced(by: totalRead), respLength - totalRead)
-                if r <= 0 { return false }
-                totalRead += r
-            }
-            return true
-        }
-
-        guard readSuccess else {
-            throw NSError(domain: "IPCClient", code: 4, userInfo: [NSLocalizedDescriptionKey: "Failed to read full response payload"])
-        }
-
-        return try JSONDecoder().decode(IPCResponse.self, from: respData)
+        SocketFrame.configure(fd)
+        try SocketFrame.send(fd, data: JSONEncoder().encode(request))
+        return try JSONDecoder().decode(IPCResponse.self, from: SocketFrame.receive(fd))
     }
 }

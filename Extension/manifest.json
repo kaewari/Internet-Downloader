@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Internet Downloader Integration Module",
-  "version": "1.1.0",
+  "version": "1.3.0",
   "description": "Tích hợp tải xuống đa luồng siêu tốc, bắt link video/audio/ảnh và quét hàng loạt cho Internet Downloader trên macOS.",
   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA5zYhfzQ4CwODMAMxcAp4jtuvCbprAR/oeH5RHBJSgw2yehp0gU2cb6w/QDAUPcR6OyXnrMUS+FKRuhlUXqO2weJ4dtafQVkK6lCMIXV1msFYEhLZ5WOrV6+g+Zm29LlH8X7W1FaceMny4hzqp09t0Q3O5M7u42LqUTbto2rUulnKn4O18QgbmvMwbUJ4fXvrVK37fB2qHPwvzwkgFDJmjmFDsfnSyijCLoGGB+xBnRDtPSnRhUA2P57w7PaO4z1MmkXXuZOzVwW+sK+OeQzZbAKnouxFWrDbxn2oR44i3sMFR8nAVnE2fGhoFmqEvBaBFmT5CTjyQ79EMbJ/r4YOPwIDAQAB",
   "permissions": [
@@ -9,7 +9,12 @@
     "nativeMessaging",
     "storage",
     "contextMenus",
-    "tabs"
+    "tabs",
+    "webRequest",
+    "cookies",
+    "notifications",
+    "webNavigation",
+    "scripting"
   ],
   "host_permissions": [
     "<all_urls>"
@@ -19,10 +24,18 @@
   },
   "content_scripts": [
     {
-      "matches": ["<all_urls>"],
-      "js": ["content.js"],
-      "css": ["styles/sniffer.css"],
-      "run_at": "document_idle"
+      "matches": [
+        "<all_urls>"
+      ],
+      "js": [
+        "telegram.js",
+        "content.js"
+      ],
+      "css": [
+        "styles/sniffer.css"
+      ],
+      "run_at": "document_idle",
+      "all_frames": true
     }
   ],
   "action": {

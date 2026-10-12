@@ -14,7 +14,13 @@ swift build
 echo "==> 2. Running all Unit & Integration Tests..."
 swift test --verbose
 
-echo "==> 3. Verifying Browser Extension Structure..."
+echo "==> 3. Testing browser extension protocol..."
+node --test Tests/ExtensionTests/*.test.cjs
+node --check Extension/background.js
+node --check Extension/content.js
+node --check Extension/telegram.js
+node --check Extension/browser-transfer.js
+echo "==> 4. Verifying Browser Extension Structure..."
 if [ ! -f "Extension/manifest.json" ]; then
     echo "ERROR: Missing Extension/manifest.json"
     exit 1
@@ -33,5 +39,5 @@ if [ ! -f "Extension/icons/icon128.png" ]; then
 fi
 
 echo "=========================================================="
-echo "  ALL VERIFICATION CHECKS PASSED SUCCESSFULLY (100%)"
+echo "  OFFLINE CHECKS PASSED; live Chrome/Telegram acceptance is separate"
 echo "=========================================================="

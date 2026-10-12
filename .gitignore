@@ -6,3 +6,8 @@ Packages/
 DerivedData/
 .swiftpm/
 dist/
+test_downloads/
+Downloads/
+logs/
+.runtime/
+__pycache__/

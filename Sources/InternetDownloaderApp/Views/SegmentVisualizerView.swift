@@ -18,7 +18,7 @@ public struct SegmentVisualizerView: View {
                     .fontWeight(.semibold)
                     .foregroundColor(.secondary)
                 Spacer()
-                Text("\(segments.count) kết nối")
+                Text(segments.isEmpty ? "Đơn luồng" : "\(segments.count) kết nối")
                     .font(.caption2)
                     .padding(.horizontal, 6)
                     .padding(.vertical, 2)
@@ -31,7 +31,7 @@ public struct SegmentVisualizerView: View {
                     .fill(Color.secondary.opacity(0.2))
                     .frame(height: 16)
                     .overlay(
-                        Text("Chưa bắt đầu hoặc đơn luồng")
+                        Text("Đang kết nối luồng tải...")
                             .font(.system(size: 10))
                             .foregroundColor(.secondary)
                     )
@@ -72,12 +72,19 @@ public struct SegmentVisualizerView: View {
     }
 
     private func segmentWidth(for segment: DownloadSegment, in totalWidth: CGFloat) -> CGFloat {
-        guard totalBytes > 0, segment.expectedBytes > 0 else {
-            return totalWidth / CGFloat(max(1, segments.count))
+        guard !segments.isEmpty else { return totalWidth }
+        let spacing = CGFloat(max(0, segments.count - 1) * 2)
+        let availableWidth = max(0, totalWidth - spacing)
+        let totalExpected = segments.reduce(Int64(0)) { $0 + $1.expectedBytes }
+
+        // If segments collectively span the whole file (HTTP range partitioning)
+        if totalBytes > 0 && totalExpected > 0 && abs(Double(totalExpected - totalBytes)) <= Double(totalBytes) * 0.15 {
+            let ratio = CGFloat(segment.expectedBytes) / CGFloat(totalBytes)
+            return max(4, availableWidth * ratio)
         }
-        let ratio = CGFloat(segment.expectedBytes) / CGFloat(totalBytes)
-        let spacing = CGFloat((segments.count - 1) * 2)
-        return max(4, (totalWidth - spacing) * ratio)
+
+        // Otherwise (HLS worker slots or equal distribution), divide width equally among connections
+        return max(4, availableWidth / CGFloat(segments.count))
     }
 
     private func statusColor(_ status: SegmentStatus) -> Color {
@@ -102,7 +109,7 @@ private struct SegmentBar: View {
 
             RoundedRectangle(cornerRadius: 2)
                 .fill(barGradient)
-                .frame(width: max(0, width * CGFloat(segment.progress)))
+                .frame(width: max(segment.status == .downloading ? 2 : 0, width * CGFloat(segment.progress)))
         }
         .frame(width: width, height: 16)
     }

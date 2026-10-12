@@ -32,6 +32,16 @@ let package = Package(
             name: "DownloaderCoreTests",
             dependencies: ["DownloaderCore"],
             path: "Tests/DownloaderCoreTests"
+        ),
+        .executableTarget(
+            name: "test-100-sources",
+            dependencies: ["DownloaderCore"],
+            path: "Sources/Test100Sources"
+        ),
+        .executableTarget(
+            name: "test-10-sources",
+            dependencies: ["DownloaderCore"],
+            path: "Sources/Test10Sources"
         )
     ]
 )

@@ -63,6 +63,7 @@ public final class UnixDomainSocketServer: @unchecked Sendable {
             throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
         }
 
+        chmod(socketPath, 0o600)
         isRunning = true
         queue.async { [weak self] in
             self?.acceptLoop()
@@ -70,12 +71,13 @@ public final class UnixDomainSocketServer: @unchecked Sendable {
     }
 
     public func stop() {
+        let ownedSocket = serverFd >= 0
         isRunning = false
         if serverFd >= 0 {
             close(serverFd)
             serverFd = -1
         }
-        unlink(socketPath)
+        if ownedSocket { unlink(socketPath) }
     }
 
     private func acceptLoop() {
@@ -102,54 +104,14 @@ public final class UnixDomainSocketServer: @unchecked Sendable {
     private func handleClient(clientFd: Int32) async {
         defer { close(clientFd) }
 
-        // Read 4-byte length prefix
-        var lengthBuffer = UInt32(0)
-        let bytesRead = read(clientFd, &lengthBuffer, 4)
-        guard bytesRead == 4 else { return }
-
-        let payloadLength = Int(UInt32(bigEndian: lengthBuffer))
-        guard payloadLength > 0 && payloadLength <= 10 * 1024 * 1024 else { return } // Max 10MB
-
-        var payloadData = Data(count: payloadLength)
-        var totalRead = 0
-
-        let readSuccess = payloadData.withUnsafeMutableBytes { (rawPtr: UnsafeMutableRawBufferPointer) -> Bool in
-            guard let baseAddress = rawPtr.baseAddress else { return false }
-            while totalRead < payloadLength {
-                let r = read(clientFd, baseAddress.advanced(by: totalRead), payloadLength - totalRead)
-                if r <= 0 { return false }
-                totalRead += r
-            }
-            return true
-        }
-
-        guard readSuccess else { return }
-
+        SocketFrame.configure(clientFd)
         do {
-            let request = try JSONDecoder().decode(IPCRequest.self, from: payloadData)
-            let response: IPCResponse
-            if let handler = self.requestHandler {
-                response = await handler(request)
-            } else {
-                response = IPCResponse(success: false, message: "No handler registered")
-            }
-
-            if let respData = try? JSONEncoder().encode(response) {
-                var len = UInt32(respData.count).bigEndian
-                _ = write(clientFd, &len, 4)
-                _ = respData.withUnsafeBytes { rawPtr in
-                    write(clientFd, rawPtr.baseAddress!, respData.count)
-                }
-            }
+            let request = try JSONDecoder().decode(IPCRequest.self, from: SocketFrame.receive(clientFd))
+            let response = await requestHandler?(request) ?? IPCResponse(success: false, message: "No handler registered")
+            try SocketFrame.send(clientFd, data: JSONEncoder().encode(response))
         } catch {
-            let errResp = IPCResponse(success: false, message: "Malformed request: \(error.localizedDescription)")
-            if let respData = try? JSONEncoder().encode(errResp) {
-                var len = UInt32(respData.count).bigEndian
-                _ = write(clientFd, &len, 4)
-                _ = respData.withUnsafeBytes { rawPtr in
-                    write(clientFd, rawPtr.baseAddress!, respData.count)
-                }
-            }
+            let response = IPCResponse(success: false, message: "Invalid IPC frame")
+            try? SocketFrame.send(clientFd, data: JSONEncoder().encode(response))
         }
     }
 }

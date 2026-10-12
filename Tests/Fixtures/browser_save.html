@@ -1,0 +1,5 @@
+<!doctype html><meta charset="utf-8"><title>IDM Chrome browser canary</title><style>body{font:20px sans-serif;padding:30px}#MediaViewer{max-width:680px}video{width:640px}button{font-size:20px;padding:12px}</style><h1>IDM browser Save fixture</h1><div id="MediaViewer"><video controls src="video.mp4"></video><br><button id="save" title="Download video" disabled>Native Save video</button></div><p id="status">Loading fixture</p><script>
+let file; const fileMode=location.search.includes('document'); if(fileMode)document.querySelector('video').remove();
+fetch(fileMode?'document.bin':'video.mp4').then(r=>r.blob()).then(blob=>{file=blob;save.disabled=false;document.getElementById('status').textContent='Ready';});
+save.onclick=()=>{const perform=()=>{const a=document.createElement('a');a.href=URL.createObjectURL(file);a.download=fileMode?'IDM-canary-document.bin':'IDM-canary-video.mp4';a.click();};if(location.search.includes('async'))setTimeout(perform,80);else perform();};
+</script>

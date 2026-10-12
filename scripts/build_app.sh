@@ -8,11 +8,11 @@ echo "=========================================================="
 echo "  Building Internet Downloader.app & Chromium Extension   "
 echo "=========================================================="
 
-DIST_DIR="$DIR/dist"
+DIST_DIR="${IDM_BUILD_DIR:-$DIR/.runtime/release-staging/$(date +%Y%m%d-%H%M%S)}"
 APP_NAME="Internet Downloader.app"
 APP_DIR="$DIST_DIR/$APP_NAME"
 
-rm -rf "$DIST_DIR"
+if [ -e "$DIST_DIR" ]; then echo "Staging already exists: $DIST_DIR"; exit 1; fi
 mkdir -p "$DIST_DIR"
 
 echo "==> 1. Compiling Swift products in RELEASE mode..."
@@ -118,7 +118,7 @@ cat <<EOF > "$CONTENTS_DIR/Info.plist"
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
-    <string>1.0.0</string>
+    <string>1.1.0</string>
     <key>CFBundleVersion</key>
     <string>1</string>
     <key>LSMinimumSystemVersion</key>
@@ -145,37 +145,9 @@ cd "$DIST_DIR"
 zip -q -r "Internet-Downloader-Extension.zip" "Extension"
 cd "$DIR"
 
-echo "==> 7. Registering Native Messaging Host to point to the built App bundle..."
-HOST_NAME="com.internetdownloader.host"
-HOST_PATH="$HELPERS_DIR/internet-downloader-host"
-MANIFEST_CONTENT=$(cat <<EOF
-{
-  "name": "$HOST_NAME",
-  "description": "Internet Downloader Native Messaging Host for macOS",
-  "path": "$HOST_PATH",
-  "type": "stdio",
-  "allowed_origins": [
-    "chrome-extension://nljinpcahdihnlhidjdacnhlchlpblnk/"
-  ]
-}
-EOF
-)
-
-TARGET_DIRS=(
-    "$HOME/Library/Application Support/Google/Chrome/NativeMessagingHosts"
-    "$HOME/Library/Application Support/Chromium/NativeMessagingHosts"
-    "$HOME/Library/Application Support/Microsoft Edge/NativeMessagingHosts"
-    "$HOME/Library/Application Support/BraveSoftware/Brave-Browser/NativeMessagingHosts"
-    "$HOME/Library/Application Support/Arc/User Data/NativeMessagingHosts"
-)
-
-for target in "${TARGET_DIRS[@]}"; do
-    if mkdir -p "$target" 2>/dev/null; then
-        echo "$MANIFEST_CONTENT" > "$target/$HOST_NAME.json"
-        echo "  -> Đã cập nhật Native Messaging Host: $target/$HOST_NAME.json"
-    fi
-done
-
+echo "==> 7. Verify staged bundle; installation is a separate idle-only step."
+codesign --verify --deep --strict "$APP_DIR"
+plutil -lint "$CONTENTS_DIR/Info.plist"
 echo "=========================================================="
 echo "  BUILD & PACKAGING THÀNH CÔNG RỰC RỠ!"
 echo "  - macOS App: $APP_DIR"

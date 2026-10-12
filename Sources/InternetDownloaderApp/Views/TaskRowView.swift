@@ -9,6 +9,7 @@ public struct TaskRowView: View {
     public let onDelete: () -> Void
     public let onOpen: () -> Void
     public let onReveal: () -> Void
+    public let onRefreshAddress: (() -> Void)?
 
     public init(
         task: DownloadTask,
@@ -17,7 +18,8 @@ public struct TaskRowView: View {
         onResume: @escaping () -> Void,
         onDelete: @escaping () -> Void,
         onOpen: @escaping () -> Void,
-        onReveal: @escaping () -> Void
+        onReveal: @escaping () -> Void,
+        onRefreshAddress: (() -> Void)? = nil
     ) {
         self.task = task
         self.isSelected = isSelected
@@ -26,6 +28,7 @@ public struct TaskRowView: View {
         self.onDelete = onDelete
         self.onOpen = onOpen
         self.onReveal = onReveal
+        self.onRefreshAddress = onRefreshAddress
     }
 
     public var body: some View {
@@ -53,7 +56,7 @@ public struct TaskRowView: View {
 
                 // Sub-info: sizes, speed, ETA
                 HStack(spacing: 8) {
-                    Text(formatBytes(task.downloadedBytes) + (task.totalBytes > 0 ? " / " + formatBytes(task.totalBytes) : ""))
+                    Text(sizeAndProgressText)
                         .font(.system(size: 11))
                         .foregroundColor(.secondary)
 
@@ -61,6 +64,10 @@ public struct TaskRowView: View {
                         Text("• " + formatSpeed(task.speed))
                             .font(.system(size: 11, weight: .medium))
                             .foregroundColor(.blue)
+                    }
+
+                    if let info = task.browserInfo {
+                        Text("\(info.phaseLabel) · \(info.verification)").font(.caption2).foregroundColor(.secondary)
                     }
 
                     if let err = task.errorMessage {
@@ -80,7 +87,7 @@ public struct TaskRowView: View {
                                     .font(.system(size: 10))
                             }
                             .buttonStyle(.plain)
-                            .help("Tạm dừng")
+                            .help(task.browserInfo == nil ? "Tạm dừng" : "Hủy phiên tải trình duyệt")
                         } else if task.status == .paused || task.status == .failed {
                             Button(action: onResume) {
                                 Image(systemName: "play.fill")
@@ -121,6 +128,45 @@ public struct TaskRowView: View {
         .padding(.horizontal, 10)
         .background(isSelected ? Color.accentColor.opacity(0.12) : Color.clear)
         .cornerRadius(6)
+        .contextMenu {
+            if task.status == .downloading {
+                Button(action: onPause) {
+                    Label("Tạm dừng", systemImage: "pause.fill")
+                }
+            } else if task.status == .paused || task.status == .failed {
+                Button(action: onResume) {
+                    Label("Tiếp tục tải", systemImage: "play.fill")
+                }
+            }
+
+            if let onRefresh = onRefreshAddress, task.status != .completed {
+                Button(action: onRefresh) {
+                    Label("Cập nhật địa chỉ tải...", systemImage: "arrow.clockwise.circle")
+                }
+            }
+
+            Button(action: {
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(task.url.absoluteString, forType: .string)
+            }) {
+                Label("Sao chép liên kết", systemImage: "doc.on.doc")
+            }
+
+            if task.status == .completed {
+                Button(action: onOpen) {
+                    Label("Mở file", systemImage: "arrow.up.forward.app")
+                }
+                Button(action: onReveal) {
+                    Label("Hiển thị trong Finder", systemImage: "folder")
+                }
+            }
+
+            Divider()
+
+            Button(role: .destructive, action: onDelete) {
+                Label("Xóa tác vụ", systemImage: "trash")
+            }
+        }
     }
 
     private func fileIconName(for filename: String) -> String {
@@ -128,10 +174,10 @@ public struct TaskRowView: View {
         switch ext {
         case "mp4", "mkv", "mov", "avi", "webm", "ts": return "film"
         case "mp3", "m4a", "flac", "wav", "aac": return "music.note"
-        case "zip", "rar", "7z", "tar", "gz": return "doc.zipper"
-        case "dmg", "pkg", "iso", "app": return "shippingbox"
-        case "pdf": return "doc.richtext"
-        case "jpg", "jpeg", "png", "webp", "gif": return "photo"
+        case "zip", "rar", "7z", "tar", "gz", "bz2", "xz": return "doc.zipper"
+        case "dmg", "pkg", "iso", "app", "exe", "msi", "deb", "rpm", "appimage": return "shippingbox"
+        case "pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "txt", "rtf": return "doc.richtext"
+        case "jpg", "jpeg", "png", "webp", "gif", "svg": return "photo"
         default: return "doc"
         }
     }
@@ -179,6 +225,8 @@ public struct TaskRowView: View {
                 .padding(.vertical, 2)
                 .background(Color.purple.opacity(0.12))
                 .cornerRadius(4)
+        case .needsConfirmation:
+            Text("Cần xác nhận file trong Chrome").font(.caption).foregroundColor(.orange)
         case .pending:
             Text("Chờ tải")
                 .font(.system(size: 10, weight: .semibold))
@@ -188,6 +236,18 @@ public struct TaskRowView: View {
                 .background(Color.secondary.opacity(0.12))
                 .cornerRadius(4)
         }
+    }
+
+    private var sizeAndProgressText: String {
+        if task.status == .completed {
+            return formatBytes(task.totalBytes > 0 ? task.totalBytes : task.downloadedBytes)
+        }
+        if task.segmentsCount > 0 && task.downloadedSegmentsCount > 0 && task.status == .downloading {
+            let downloadedStr = formatBytes(task.downloadedBytes)
+            let totalStr = task.totalBytes > 0 ? " / ~" + formatBytes(task.totalBytes) : ""
+            return "\(downloadedStr)\(totalStr) (\(task.downloadedSegmentsCount)/\(task.segmentsCount) phân đoạn)"
+        }
+        return formatBytes(task.downloadedBytes) + (task.totalBytes > 0 ? " / " + formatBytes(task.totalBytes) : "")
     }
 
     private func formatBytes(_ bytes: Int64) -> String {

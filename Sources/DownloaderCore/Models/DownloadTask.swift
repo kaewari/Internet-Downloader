@@ -7,6 +7,7 @@ public enum TaskStatus: String, Codable, Sendable {
     case assembling
     case completed
     case failed
+    case needsConfirmation = "needs_confirmation"
 }
 
 public struct DownloadTask: Identifiable, Codable, Sendable {
@@ -22,16 +23,24 @@ public struct DownloadTask: Identifiable, Codable, Sendable {
     public var lastModified: String?
     public var acceptRanges: Bool
     public var segmentsCount: Int
+    public var downloadedSegmentsCount: Int
     public var errorMessage: String?
     public var createdAt: Date
     public var updatedAt: Date
     public var referrer: String?
     public var userAgent: String?
     public var cookies: String?
+    public var headers: [String: String]?
+    public var browserInfo: BrowserTaskInfo?
 
     public var progress: Double {
-        guard totalBytes > 0 else { return 0.0 }
-        return min(1.0, max(0.0, Double(downloadedBytes) / Double(totalBytes)))
+        if totalBytes > 0 {
+            return min(1.0, max(0.0, Double(downloadedBytes) / Double(totalBytes)))
+        }
+        if segmentsCount > 0 && downloadedSegmentsCount > 0 {
+            return min(1.0, max(0.0, Double(downloadedSegmentsCount) / Double(segmentsCount)))
+        }
+        return 0.0
     }
 
     public var finalFilePath: URL {
@@ -55,12 +64,14 @@ public struct DownloadTask: Identifiable, Codable, Sendable {
         lastModified: String? = nil,
         acceptRanges: Bool = false,
         segmentsCount: Int = 8,
+        downloadedSegmentsCount: Int = 0,
         errorMessage: String? = nil,
         createdAt: Date = Date(),
         updatedAt: Date = Date(),
         referrer: String? = nil,
         userAgent: String? = nil,
-        cookies: String? = nil
+        cookies: String? = nil,
+        headers: [String: String]? = nil
     ) {
         self.id = id
         self.url = url
@@ -74,11 +85,13 @@ public struct DownloadTask: Identifiable, Codable, Sendable {
         self.lastModified = lastModified
         self.acceptRanges = acceptRanges
         self.segmentsCount = segmentsCount
+        self.downloadedSegmentsCount = downloadedSegmentsCount
         self.errorMessage = errorMessage
         self.createdAt = createdAt
         self.updatedAt = updatedAt
         self.referrer = referrer
         self.userAgent = userAgent
         self.cookies = cookies
+        self.headers = headers
     }
 }

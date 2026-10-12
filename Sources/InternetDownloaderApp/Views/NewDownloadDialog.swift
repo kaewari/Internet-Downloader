@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import DownloaderCore
 
 public struct NewDownloadDialog: View {
     @Binding public var isPresented: Bool
@@ -123,8 +124,12 @@ public struct NewDownloadDialog: View {
     }
 
     private func autoPopulateFilename(from urlStr: String) {
-        if let url = URL(string: urlStr), !url.lastPathComponent.isEmpty {
-            self.filename = url.lastPathComponent
+        if let url = URL(string: urlStr) {
+            if let extracted = FileTypeDetector.extractFilename(from: url) {
+                self.filename = extracted
+            } else if !url.lastPathComponent.isEmpty {
+                self.filename = url.lastPathComponent
+            }
         }
     }
 
@@ -142,9 +147,8 @@ public struct NewDownloadDialog: View {
     }
 
     private func startDownload() {
-        guard let url = URL(string: urlString.trimmingCharacters(in: .whitespacesAndNewlines)),
-              url.scheme == "http" || url.scheme == "https" else {
-            errorMessage = "Vui lòng nhập URL HTTP/HTTPS hợp lệ."
+        guard let url = URLNormalizer.normalize(urlString) else {
+            errorMessage = "Vui lòng nhập URL hợp lệ (HTTP, HTTPS hoặc Data URL)."
             return
         }
 

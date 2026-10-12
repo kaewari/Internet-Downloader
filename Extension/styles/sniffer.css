@@ -1,10 +1,11 @@
 /* Floating Media Sniffer Bar - Internet Downloader */
 
 .idm-floating-bar {
-  position: absolute;
-  z-index: 2147483647;
-  display: flex;
-  align-items: center;
+  position: fixed !important;
+  z-index: 2147483647 !important;
+  box-sizing: border-box !important;
+  display: flex !important;
+  align-items: center !important;
   background: rgba(18, 18, 22, 0.90);
   backdrop-filter: blur(14px);
   -webkit-backdrop-filter: blur(14px);
@@ -20,6 +21,28 @@
   color: #ffffff;
   transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
   pointer-events: auto;
+  appearance: none !important;
+  -webkit-appearance: none !important;
+  margin: 0 !important;
+  border: 1px solid rgba(255, 255, 255, 0.2) !important;
+  color: #ffffff !important;
+  opacity: 0 !important;
+  visibility: hidden !important;
+  pointer-events: none !important;
+  transition: opacity 0.12s ease, visibility 0s linear 0.12s, background 0.2s ease, transform 0.2s ease !important;
+}
+
+.idm-floating-bar.idm-positionable.idm-visible,
+.idm-floating-bar.idm-positionable:focus-visible {
+  opacity: 1 !important;
+  visibility: visible !important;
+  pointer-events: auto !important;
+  transition-delay: 0s !important;
+}
+
+.idm-floating-bar:focus-visible {
+  outline: 2px solid #0a84ff !important;
+  outline-offset: 2px !important;
 }
 
 .idm-floating-bar:hover {
@@ -61,159 +84,533 @@
 /* ========================================== */
 
 .idm-batch-backdrop {
-  position: fixed;
-  inset: 0;
-  z-index: 2147483647;
-  background: rgba(0, 0, 0, 0.65);
-  backdrop-filter: blur(6px);
-  -webkit-backdrop-filter: blur(6px);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-  color: #f2f2f7;
+  position: fixed !important;
+  inset: 0 !important;
+  z-index: 2147483647 !important;
+  background: rgba(0, 0, 0, 0.72) !important;
+  backdrop-filter: blur(8px) !important;
+  -webkit-backdrop-filter: blur(8px) !important;
+  display: flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif !important;
+  color: #f2f2f7 !important;
+  box-sizing: border-box !important;
 }
 
 .idm-batch-dialog {
-  background: #1e1e24;
-  border: 1px solid rgba(255, 255, 255, 0.15);
-  border-radius: 12px;
-  width: 600px;
-  max-width: 90vw;
-  max-height: 80vh;
-  display: flex;
-  flex-direction: column;
-  box-shadow: 0 16px 40px rgba(0, 0, 0, 0.6);
-  overflow: hidden;
+  background: #1c1c20 !important;
+  border: 1px solid rgba(255, 255, 255, 0.16) !important;
+  border-radius: 14px !important;
+  width: 660px !important;
+  max-width: 92vw !important;
+  height: 580px !important;
+  max-height: 86vh !important;
+  display: flex !important;
+  flex-direction: column !important;
+  box-shadow: 0 20px 50px rgba(0, 0, 0, 0.75), 0 0 0 1px rgba(255, 255, 255, 0.08) !important;
+  overflow: hidden !important;
+  animation: idmBatchFadeIn 0.2s cubic-bezier(0.16, 1, 0.3, 1) !important;
+}
+
+@keyframes idmBatchFadeIn {
+  from { opacity: 0; transform: scale(0.97); }
+  to { opacity: 1; transform: scale(1); }
 }
 
 .idm-batch-header {
-  padding: 14px 18px;
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+  padding: 14px 18px !important;
+  display: flex !important;
+  justify-content: space-between !important;
+  align-items: center !important;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.1) !important;
+  background: rgba(255, 255, 255, 0.02) !important;
 }
 
 .idm-batch-title {
-  font-size: 14px;
-  font-weight: 600;
-  display: flex;
-  align-items: center;
-  gap: 8px;
+  font-size: 14px !important;
+  font-weight: 600 !important;
+  display: flex !important;
+  align-items: center !important;
+  gap: 8px !important;
+  color: #ffffff !important;
 }
 
 .idm-batch-close {
-  background: none;
-  border: none;
-  color: #8e8e93;
-  font-size: 16px;
-  cursor: pointer;
-  padding: 4px;
+  background: none !important;
+  border: none !important;
+  color: #8e8e93 !important;
+  font-size: 16px !important;
+  cursor: pointer !important;
+  padding: 4px 8px !important;
+  border-radius: 6px !important;
+  transition: all 0.15s !important;
 }
 
 .idm-batch-close:hover {
-  color: #ffffff;
+  color: #ffffff !important;
+  background: rgba(255, 255, 255, 0.1) !important;
 }
 
-.idm-batch-body {
-  padding: 14px 18px;
-  overflow-y: auto;
-  flex: 1;
+/* Category Tabs Toolbar */
+.idm-batch-toolbar {
+  display: flex !important;
+  justify-content: space-between !important;
+  align-items: center !important;
+  padding: 10px 18px !important;
+  background: #17171a !important;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08) !important;
+  gap: 12px !important;
+  flex-wrap: wrap !important;
+}
+
+.idm-tab-bar {
+  display: flex !important;
+  gap: 6px !important;
+  align-items: center !important;
+}
+
+.idm-tab-btn {
+  background: rgba(255, 255, 255, 0.06) !important;
+  border: 1px solid rgba(255, 255, 255, 0.08) !important;
+  border-radius: 8px !important;
+  color: #aeaeb2 !important;
+  font-size: 12px !important;
+  font-weight: 500 !important;
+  padding: 5px 12px !important;
+  cursor: pointer !important;
+  display: inline-flex !important;
+  align-items: center !important;
+  gap: 6px !important;
+  transition: all 0.15s ease !important;
+}
+
+.idm-tab-btn:hover {
+  background: rgba(255, 255, 255, 0.12) !important;
+  color: #f2f2f7 !important;
+}
+
+.idm-tab-btn.active {
+  background: #0a84ff !important;
+  border-color: #0a84ff !important;
+  color: #ffffff !important;
+  font-weight: 600 !important;
+  box-shadow: 0 2px 8px rgba(10, 132, 255, 0.35) !important;
+}
+
+.idm-tab-count {
+  font-size: 11px !important;
+  padding: 1px 6px !important;
+  border-radius: 10px !important;
+  background: rgba(255, 255, 255, 0.15) !important;
+  color: inherit !important;
+}
+
+.idm-tab-btn.active .idm-tab-count {
+  background: rgba(255, 255, 255, 0.25) !important;
 }
 
 .idm-batch-actions-bar {
-  display: flex;
-  gap: 8px;
-  margin-bottom: 10px;
+  display: flex !important;
+  gap: 8px !important;
+  align-items: center !important;
+}
+
+.idm-batch-body {
+  padding: 12px 18px !important;
+  overflow-y: auto !important;
+  flex: 1 !important;
 }
 
 .idm-batch-list {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
+  display: flex !important;
+  flex-direction: column !important;
+  gap: 6px !important;
 }
 
+/* Row Styling */
 .idm-batch-row {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 8px 10px;
-  background: rgba(255, 255, 255, 0.04);
-  border-radius: 6px;
-  cursor: pointer;
-  transition: background 0.15s;
+  display: flex !important;
+  align-items: center !important;
+  gap: 12px !important;
+  padding: 8px 12px !important;
+  background: rgba(255, 255, 255, 0.04) !important;
+  border: 1px solid rgba(255, 255, 255, 0.06) !important;
+  border-radius: 8px !important;
+  cursor: pointer !important;
+  user-select: none !important;
+  transition: all 0.15s ease !important;
+  box-sizing: border-box !important;
 }
 
 .idm-batch-row:hover {
-  background: rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.08) !important;
+  border-color: rgba(255, 255, 255, 0.12) !important;
 }
 
+.idm-batch-row.idm-row-unselected {
+  opacity: 0.48 !important;
+  background: rgba(255, 255, 255, 0.02) !important;
+}
+
+/* Explicit custom-styled checkbox impervious to website resets */
 .idm-item-check {
-  cursor: pointer;
+  -webkit-appearance: none !important;
+  appearance: none !important;
+  width: 18px !important;
+  height: 18px !important;
+  min-width: 18px !important;
+  border: 2px solid rgba(255, 255, 255, 0.35) !important;
+  border-radius: 4px !important;
+  background: rgba(255, 255, 255, 0.06) !important;
+  cursor: pointer !important;
+  outline: none !important;
+  margin: 0 !important;
+  padding: 0 !important;
+  flex-shrink: 0 !important;
+  position: relative !important;
+  display: inline-block !important;
+  box-sizing: border-box !important;
+  transition: all 0.15s ease !important;
 }
 
-.idm-type-badge {
-  font-size: 10px;
-  font-weight: 700;
-  padding: 2px 6px;
-  border-radius: 4px;
-  background: #0a84ff;
-  color: white;
-  min-width: 44px;
-  text-align: center;
+.idm-item-check:checked {
+  background: #0a84ff !important;
+  border-color: #0a84ff !important;
+}
+
+.idm-item-check:checked::after {
+  content: "" !important;
+  position: absolute !important;
+  left: 4px !important;
+  top: 1px !important;
+  width: 4px !important;
+  height: 8px !important;
+  border: solid white !important;
+  border-width: 0 2px 2px 0 !important;
+  transform: rotate(45deg) !important;
+  display: block !important;
+}
+
+/* Media Thumbnail Container */
+.idm-thumb-box {
+  width: 52px !important;
+  height: 40px !important;
+  min-width: 52px !important;
+  border-radius: 6px !important;
+  overflow: hidden !important;
+  flex-shrink: 0 !important;
+  background: #141418 !important;
+  border: 1px solid rgba(255, 255, 255, 0.12) !important;
+  display: flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  position: relative !important;
+  box-sizing: border-box !important;
+}
+
+.idm-thumb-img {
+  width: 100% !important;
+  height: 100% !important;
+  object-fit: cover !important;
+  display: block !important;
+}
+
+.idm-thumb-play-overlay {
+  position: absolute !important;
+  inset: 0 !important;
+  background: rgba(0, 0, 0, 0.42) !important;
+  display: flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  color: #ffffff !important;
+}
+
+.idm-thumb-play-overlay svg {
+  filter: drop-shadow(0 2px 4px rgba(0,0,0,0.6)) !important;
+}
+
+.idm-thumb-video-placeholder {
+  background: linear-gradient(135deg, #1c2738 0%, #0d1829 100%) !important;
+  color: #0a84ff !important;
+  flex-direction: column !important;
+  gap: 2px !important;
+}
+
+.idm-thumb-audio-placeholder {
+  background: linear-gradient(135deg, #2b1f3d 0%, #170d24 100%) !important;
+  color: #bf5af2 !important;
+  flex-direction: column !important;
+  gap: 2px !important;
+}
+
+.idm-thumb-file-placeholder {
+  background: linear-gradient(135deg, #2c2c2e 0%, #1c1c1e 100%) !important;
+  color: #ff9f0a !important;
+  flex-direction: column !important;
+  gap: 2px !important;
+}
+
+.idm-thumb-fallback {
+  width: 100% !important;
+  height: 100% !important;
+  display: flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  color: #8e8e93 !important;
+  background: rgba(255, 255, 255, 0.05) !important;
+}
+
+.idm-thumb-tag {
+  font-size: 8px !important;
+  font-weight: 700 !important;
+  letter-spacing: 0.5px !important;
+  text-transform: uppercase !important;
+  opacity: 0.8 !important;
+}
+
+/* Item Meta */
+.idm-item-meta {
+  flex: 1 !important;
+  min-width: 0 !important;
+  display: flex !important;
+  flex-direction: column !important;
+  gap: 2px !important;
 }
 
 .idm-item-name {
-  font-size: 12px;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  flex: 1;
-  color: #d1d1d6;
+  font-size: 12px !important;
+  font-weight: 500 !important;
+  white-space: nowrap !important;
+  overflow: hidden !important;
+  text-overflow: ellipsis !important;
+  color: #f2f2f7 !important;
+}
+
+.idm-item-sub {
+  display: flex !important;
+  align-items: center !important;
+  gap: 8px !important;
+  font-size: 10px !important;
+  color: #8e8e93 !important;
+}
+
+.idm-item-type-badge {
+  font-size: 9px !important;
+  font-weight: 600 !important;
+  padding: 1px 4px !important;
+  border-radius: 3px !important;
+  background: rgba(255, 255, 255, 0.08) !important;
+  color: #aeaeb2 !important;
+}
+
+.idm-item-domain {
+  white-space: nowrap !important;
+  overflow: hidden !important;
+  text-overflow: ellipsis !important;
 }
 
 .idm-batch-footer {
-  padding: 12px 18px;
-  display: flex;
-  justify-content: flex-end;
-  gap: 10px;
-  border-top: 1px solid rgba(255, 255, 255, 0.1);
-  background: rgba(0, 0, 0, 0.2);
+  padding: 12px 18px !important;
+  display: flex !important;
+  justify-content: space-between !important;
+  align-items: center !important;
+  border-top: 1px solid rgba(255, 255, 255, 0.1) !important;
+  background: rgba(0, 0, 0, 0.25) !important;
+}
+
+.idm-batch-footer-left {
+  font-size: 12px !important;
+  color: #8e8e93 !important;
+}
+
+.idm-batch-footer-right {
+  display: flex !important;
+  gap: 10px !important;
+  align-items: center !important;
 }
 
 .idm-btn-primary {
-  background: #0a84ff;
-  color: white;
-  border: none;
-  border-radius: 6px;
-  padding: 8px 16px;
-  font-size: 12px;
-  font-weight: 600;
-  cursor: pointer;
+  background: #0a84ff !important;
+  color: white !important;
+  border: none !important;
+  border-radius: 6px !important;
+  padding: 8px 16px !important;
+  font-size: 12px !important;
+  font-weight: 600 !important;
+  cursor: pointer !important;
+  transition: all 0.15s !important;
 }
 
-.idm-btn-primary:hover {
-  background: #0071e3;
+.idm-btn-primary:hover:not(:disabled) {
+  background: #0071e3 !important;
+}
+
+.idm-btn-primary:disabled {
+  background: #3a3a3c !important;
+  color: #8e8e93 !important;
+  cursor: not-allowed !important;
+  opacity: 0.6 !important;
 }
 
 .idm-btn-secondary {
-  background: rgba(255, 255, 255, 0.1);
-  color: #e5e5ea;
-  border: none;
-  border-radius: 6px;
-  padding: 6px 12px;
-  font-size: 12px;
-  cursor: pointer;
+  background: rgba(255, 255, 255, 0.08) !important;
+  color: #e5e5ea !important;
+  border: 1px solid rgba(255, 255, 255, 0.08) !important;
+  border-radius: 6px !important;
+  padding: 6px 12px !important;
+  font-size: 11px !important;
+  font-weight: 500 !important;
+  cursor: pointer !important;
+  transition: all 0.15s !important;
 }
 
 .idm-btn-secondary:hover {
-  background: rgba(255, 255, 255, 0.18);
+  background: rgba(255, 255, 255, 0.15) !important;
+  color: #ffffff !important;
 }
 
 .idm-empty {
-  padding: 30px;
-  text-align: center;
+  padding: 40px 20px !important;
+  text-align: center !important;
+  color: #8e8e93 !important;
+  font-size: 13px !important;
+}
+
+/* ========================================== */
+/* In-Page IDM Floating Download Toast Card   */
+/* ========================================== */
+
+.idm-toast-container {
+  position: fixed;
+  bottom: 24px;
+  right: 24px;
+  z-index: 2147483647;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  pointer-events: none;
+}
+
+.idm-toast-card {
+  pointer-events: auto;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 330px;
+  max-width: calc(100vw - 48px);
+  padding: 12px 14px;
+  background: rgba(26, 26, 30, 0.94);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: 10px;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.55), 0 1px 3px rgba(0, 0, 0, 0.3);
+  color: #ffffff;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  animation: idmToastSlideIn 0.3s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+  transition: all 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.idm-toast-card.idm-toast-hiding {
+  opacity: 0;
+  transform: translateX(110%);
+}
+
+@keyframes idmToastSlideIn {
+  from {
+    opacity: 0;
+    transform: translateX(100%);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+.idm-toast-icon {
+  width: 34px;
+  height: 34px;
+  border-radius: 8px;
+  background: linear-gradient(135deg, #0a84ff 0%, #0066cc 100%);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  box-shadow: 0 2px 8px rgba(10, 132, 255, 0.4);
+}
+
+.idm-toast-icon svg {
+  width: 18px;
+  height: 18px;
+  color: #ffffff;
+}
+
+.idm-toast-content {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.idm-toast-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.idm-toast-title {
+  font-size: 11px;
+  font-weight: 600;
   color: #8e8e93;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.idm-toast-badge {
+  font-size: 9px;
+  font-weight: 700;
+  padding: 1px 4px;
+  border-radius: 3px;
+  background: rgba(48, 209, 88, 0.25);
+  color: #30d158;
+}
+
+.idm-toast-name {
   font-size: 13px;
+  font-weight: 600;
+  color: #f2f2f7;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.idm-toast-status {
+  font-size: 11px;
+  color: #30d158;
+  font-weight: 500;
+}
+
+.idm-toast-close {
+  background: transparent !important;
+  border: none !important;
+  color: #8e8e93 !important;
+  font-size: 14px !important;
+  cursor: pointer !important;
+  padding: 4px !important;
+  border-radius: 4px !important;
+  display: flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  transition: color 0.15s, background 0.15s !important;
+  appearance: none !important;
+  -webkit-appearance: none !important;
+  outline: none !important;
+  box-shadow: none !important;
+}
+
+.idm-toast-close:hover {
+  color: #ffffff !important;
+  background: rgba(255, 255, 255, 0.15) !important;
 }
