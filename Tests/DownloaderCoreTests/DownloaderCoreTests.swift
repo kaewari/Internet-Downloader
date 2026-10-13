@@ -916,6 +916,255 @@ final class DownloaderCoreTests: XCTestCase {
         XCTAssertEqual(dropCount, 0, "Progress must be strictly non-decreasing, but dropped \(dropCount) times")
         XCTAssertEqual(previousBytes, Int64(segmentCount) * chunkSize, "Final total must equal sum of all segments")
     }
+
+    func testHLSCancelPreservesTempAndThrows() async throws {
+        class SlowHLSProtocol: URLProtocol {
+            override class func canInit(with request: URLRequest) -> Bool { true }
+            override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+            override func startLoading() {
+                guard let url = request.url else { return }
+                if url.path.hasSuffix(".m3u8") {
+                    let playlist = """
+                    #EXTM3U
+                    #EXT-X-VERSION:3
+                    #EXT-X-TARGETDURATION:4
+                    #EXTINF:4.0,
+                    seg0.ts
+                    #EXTINF:4.0,
+                    seg1.ts
+                    #EXTINF:4.0,
+                    seg2.ts
+                    #EXTINF:4.0,
+                    seg3.ts
+                    #EXT-X-ENDLIST
+                    """
+                    let resp = HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: ["Content-Type": "application/vnd.apple.mpegurl"])!
+                    client?.urlProtocol(self, didReceive: resp, cacheStoragePolicy: .notAllowed)
+                    client?.urlProtocol(self, didLoad: Data(playlist.utf8))
+                    client?.urlProtocolDidFinishLoading(self)
+                } else if url.path.hasSuffix("seg0.ts") {
+                    let resp = HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: ["Content-Type": "video/mp2t"])!
+                    client?.urlProtocol(self, didReceive: resp, cacheStoragePolicy: .notAllowed)
+                    client?.urlProtocol(self, didLoad: Data(repeating: 0x47, count: 4096))
+                    client?.urlProtocolDidFinishLoading(self)
+                } else {
+                    Thread.sleep(forTimeInterval: 0.3)
+                    let resp = HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: ["Content-Type": "video/mp2t"])!
+                    client?.urlProtocol(self, didReceive: resp, cacheStoragePolicy: .notAllowed)
+                    client?.urlProtocol(self, didLoad: Data(repeating: 0x47, count: 4096))
+                    client?.urlProtocolDidFinishLoading(self)
+                }
+            }
+            override func stopLoading() {}
+        }
+
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [SlowHLSProtocol.self]
+        let mockSession = URLSession(configuration: config)
+        let downloader = HLSDownloader(session: mockSession)
+
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("hls_cancel_test_\(UUID().uuidString)")
+        let dest = FileManager.default.temporaryDirectory.appendingPathComponent("hls_cancel_out_\(UUID().uuidString).ts")
+        defer {
+            try? FileManager.default.removeItem(at: tempDir)
+            try? FileManager.default.removeItem(at: dest)
+        }
+
+        var didThrow = false
+        do {
+            try await downloader.download(
+                playlistURL: URL(string: "https://example.com/stream/playlist.m3u8")!,
+                destinationFile: dest,
+                tempDirectory: tempDir,
+                maxConcurrency: 1,
+                onProgress: { dSegs, _, _, _, _, _ in
+                    if dSegs >= 1 {
+                        Task { await downloader.cancel() }
+                    }
+                }
+            )
+        } catch {
+            didThrow = true
+        }
+
+        XCTAssertTrue(didThrow, "Cancelled HLS download must throw CancellationError instead of completing")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: dest.path), "Cancelled HLS download must NOT write partial output file")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: tempDir.path), "Cancelled HLS download must preserve tempDirectory for resume")
+    }
+
+    func testToolbarBatchActionsPauseResumeClearAndShutdown() throws {
+        let tempDB = FileManager.default.temporaryDirectory.appendingPathComponent("test_toolbar_\(UUID().uuidString).sqlite3").path
+        let sockPath = "/tmp/test_shutdown_\(UUID().uuidString).sock"
+        defer {
+            try? FileManager.default.removeItem(atPath: tempDB)
+            unlink(sockPath)
+        }
+        setenv("IDM_SOCKET_PATH", sockPath, 1)
+        defer { unsetenv("IDM_SOCKET_PATH") }
+
+        let manager = DownloadManager(dbPath: tempDB)
+        manager.startIPC()
+        let dest = FileManager.default.temporaryDirectory
+
+        var tDownloading = try manager.createNewTask(url: URL(string: "https://example.com/a.zip")!, filename: "a.zip", destinationFolder: dest)
+        tDownloading.status = .downloading
+        try manager.store.saveTask(tDownloading)
+
+        var tPending = try manager.createNewTask(url: URL(string: "https://example.com/b.zip")!, filename: "b.zip", destinationFolder: dest)
+        tPending.status = .pending
+        try manager.store.saveTask(tPending)
+
+        var tFailed = try manager.createNewTask(url: URL(string: "https://example.com/c.zip")!, filename: "c.zip", destinationFolder: dest)
+        tFailed.status = .failed
+        try manager.store.saveTask(tFailed)
+
+        var tCompleted = try manager.createNewTask(url: URL(string: "https://example.com/d.zip")!, filename: "d.zip", destinationFolder: dest)
+        tCompleted.status = .completed
+        try manager.store.saveTask(tCompleted)
+
+        // 1. pauseAllTasks must pause both .downloading and .pending tasks
+        manager.pauseAllTasks()
+        XCTAssertEqual(manager.getTask(id: tDownloading.id)?.status, .paused)
+        XCTAssertEqual(manager.getTask(id: tPending.id)?.status, .paused)
+        XCTAssertEqual(manager.getTask(id: tFailed.id)?.status, .failed)
+        XCTAssertEqual(manager.getTask(id: tCompleted.id)?.status, .completed)
+
+        // 2. clearCompletedAndFailedTasks must remove both .completed and .failed tasks
+        try manager.clearCompletedAndFailedTasks()
+        let remaining = manager.getAllTasks()
+        XCTAssertEqual(remaining.count, 2)
+        XCTAssertFalse(remaining.contains(where: { $0.id == tFailed.id }))
+        XCTAssertFalse(remaining.contains(where: { $0.id == tCompleted.id }))
+
+        // 3. shutdown must pause active downloading tasks, stop IPC server, and remove socket
+        tDownloading.status = .downloading
+        try manager.store.saveTask(tDownloading)
+        manager.shutdown()
+        XCTAssertEqual(manager.getTask(id: tDownloading.id)?.status, .paused)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: sockPath))
+    }
+
+    func testPauseFlushesBufferedBytesOnURLSessionCancellation() async throws {
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [Sub32KBHangProtocol.self]
+        let session = URLSession(configuration: config)
+        let downloader = HTTPRangeDownloader(session: session)
+
+        let destDir = FileManager.default.temporaryDirectory.appendingPathComponent("flush_cancel_\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: destDir, withIntermediateDirectories: true)
+        let task = DownloadTask(
+            url: URL(string: "https://example.com/archive.dmg")!,
+            filename: "archive.dmg",
+            destinationFolder: destDir,
+            totalBytes: 131_072,
+            status: .downloading,
+            acceptRanges: true,
+            segmentsCount: 1
+        )
+        defer {
+            try? FileManager.default.removeItem(at: destDir)
+            try? FileManager.default.removeItem(at: task.tempDirectory)
+        }
+
+        let initialSeg = DownloadSegment(taskId: task.id, index: 0, startByte: 0, endByte: 131_071, downloadedBytes: 0, status: .pending)
+        let segBox = LockedBox(initialSeg)
+
+        let runHandle = Task {
+            try await downloader.download(
+                task: task,
+                segments: [initialSeg],
+                onProgress: { _, _ in },
+                onSegmentUpdate: { seg in
+                    segBox.set(seg)
+                }
+            )
+        }
+
+        try await Task.sleep(nanoseconds: 150_000_000)
+        runHandle.cancel()
+        _ = await runHandle.result
+
+        let finalSeg = segBox.get()
+        XCTAssertEqual(finalSeg.status, .paused, "Cancelled segment must be marked paused")
+        XCTAssertEqual(finalSeg.downloadedBytes, 32_768, "Sub-64KB buffer must be flushed and recorded on URLSession task cancellation")
+        let fileData = try Data(contentsOf: task.finalFilePath)
+        XCTAssertEqual(fileData.prefix(32_768), Data(repeating: 0xAB, count: 32_768), "Flushed bytes must be written to disk in finalFilePath")
+    }
+
+    func testStartDownloadDeduplicatesAndUpgradesPendingConfirmationTask() async throws {
+        let tempDB = FileManager.default.temporaryDirectory.appendingPathComponent("test_dedup_\(UUID().uuidString).sqlite3").path
+        let sockPath = "/tmp/test_dedup_\(UUID().uuidString).sock"
+        defer {
+            try? FileManager.default.removeItem(atPath: tempDB)
+            unlink(sockPath)
+        }
+        setenv("IDM_SOCKET_PATH", sockPath, 1)
+        defer { unsetenv("IDM_SOCKET_PATH") }
+
+        let manager = DownloadManager(dbPath: tempDB)
+        let confirmedBox = LockedBox<[DownloadTask]>([])
+        manager.onDownloadConfirmationRequested = { t in
+            confirmedBox.mutate { $0.append(t) }
+        }
+        guard let handler = manager.ipcServer.requestHandler else {
+            return XCTFail("Missing IPC requestHandler")
+        }
+
+        // 1. First request arrives with opaque redirect URL and empty filename
+        let req1 = IPCRequest(
+            action: "start_download",
+            url: "https://artcraft.example.com/api/download/latest",
+            filename: "",
+            referrer: "https://artcraft.example.com/"
+        )
+        let resp1 = await handler(req1)
+        XCTAssertTrue(resp1.success)
+        XCTAssertNotNil(resp1.taskId)
+
+        // 2. Follow-up request arrives 20ms later from onDeterminingFilename with final URL and real filename
+        let req2 = IPCRequest(
+            action: "start_download",
+            url: "https://cdn.artcraft.example.com/releases/ArtCraft_0.41.0_universal.dmg",
+            filename: "ArtCraft_0.41.0_universal.dmg",
+            referrer: "https://artcraft.example.com/api/download/latest",
+            cookies: "session=xyz"
+        )
+        let resp2 = await handler(req2)
+        XCTAssertTrue(resp2.success)
+        XCTAssertEqual(resp2.taskId, resp1.taskId, "Follow-up start_download while awaiting confirmation must reuse the same taskId")
+
+        let allTasks = manager.getAllTasks()
+        XCTAssertEqual(allTasks.count, 1, "Must not create duplicate pending tasks for the same download")
+        XCTAssertEqual(allTasks.first?.filename, "ArtCraft_0.41.0_universal.dmg")
+        XCTAssertEqual(allTasks.first?.url.absoluteString, "https://cdn.artcraft.example.com/releases/ArtCraft_0.41.0_universal.dmg")
+        XCTAssertEqual(allTasks.first?.cookies, "session=xyz")
+        XCTAssertEqual(confirmedBox.get().last?.filename, "ArtCraft_0.41.0_universal.dmg")
+    }
+}
+
+private final class Sub32KBHangProtocol: URLProtocol {
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+    override func startLoading() {
+        guard let url = request.url else { return }
+        let resp = HTTPURLResponse(url: url, statusCode: 206, httpVersion: nil, headerFields: [
+            "Content-Length": "131072",
+            "Content-Range": "bytes 0-131071/131072"
+        ])!
+        client?.urlProtocol(self, didReceive: resp, cacheStoragePolicy: .notAllowed)
+        // Send 32KB (< 64KB bufferSize) then hang until cancelled
+        client?.urlProtocol(self, didLoad: Data(repeating: 0xAB, count: 32_768))
+    }
+    override func stopLoading() {}
+}
+
+private final class LockedBox<T>: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value: T
+    init(_ value: T) { self.value = value }
+    func get() -> T { lock.withLock { value } }
+    func set(_ newValue: T) { lock.withLock { value = newValue } }
+    func mutate(_ body: (inout T) -> Void) { lock.withLock { body(&value) } }
 }
 
 private final class ProgressHistoryTracker: @unchecked Sendable {

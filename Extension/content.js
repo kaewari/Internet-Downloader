@@ -5,15 +5,20 @@
   if (window.__idmContentLoaded) return;
   window.__idmContentLoaded = true;
 
+  let interceptDownloadsEnabled = true;
   let showFloatingBarEnabled = true;
   let sniffImagesEnabled = true;
 
-  chrome.storage.local.get(["showFloatingBar", "sniffImages"], (res) => {
+  chrome.storage.local.get(["interceptDownloads", "showFloatingBar", "sniffImages"], (res) => {
+    if (res.interceptDownloads !== undefined) interceptDownloadsEnabled = Boolean(res.interceptDownloads);
     if (res.showFloatingBar !== undefined) showFloatingBarEnabled = res.showFloatingBar;
     if (res.sniffImages !== undefined) sniffImagesEnabled = res.sniffImages;
   });
 
   chrome.storage.onChanged.addListener((changes) => {
+    if (changes.interceptDownloads) {
+      interceptDownloadsEnabled = Boolean(changes.interceptDownloads.newValue);
+    }
     if (changes.showFloatingBar) {
       showFloatingBarEnabled = changes.showFloatingBar.newValue;
       if (!showFloatingBarEnabled) removeFloatingBar();
@@ -838,6 +843,79 @@
       positionBar(currentBar, currentTargetEl);
     }
   }, { passive: true });
+
+  // ==========================================
+  // 5b. Chặn trực tiếp click vào nút/link tải xuống (<a download> / link file trực tiếp)
+  // và đánh thức MV3 Service Worker ở pointerdown để ngăn hộp thoại Save As gốc của trình duyệt
+  // ==========================================
+  const DIRECT_DOWNLOAD_EXT_REGEX = /\.(dmg|pkg|iso|zip|rar|7z|tar|gz|tgz|bz2|xz|zst|exe|msi|deb|rpm|appimage|apk|ipa)(\?|#|$)/i;
+
+  function isInterceptableDownloadAnchor(anchor) {
+    if (!anchor || typeof anchor.closest !== "function") return null;
+    if (!interceptDownloadsEnabled) return null;
+    if (location.hostname === "web.telegram.org") return null;
+
+    const hrefAttr = (anchor.getAttribute("href") || "").trim();
+    if (!hrefAttr || hrefAttr.startsWith("#") || hrefAttr.toLowerCase().startsWith("javascript:")) return null;
+
+    const resolvedHref = anchor.href || hrefAttr;
+    if (!resolvedHref || resolvedHref.startsWith("blob:") || resolvedHref.startsWith("data:")) return null;
+    if (!/^https?:\/\//i.test(resolvedHref)) return null;
+
+    const hasDownloadAttr = anchor.hasAttribute("download");
+    let pathname = "";
+    try {
+      const parsed = new URL(resolvedHref, location.href);
+      pathname = parsed.pathname || "";
+      if (!hasDownloadAttr && !DIRECT_DOWNLOAD_EXT_REGEX.test(pathname)) {
+        return null;
+      }
+      const attrName = (anchor.getAttribute("download") || "").trim();
+      const rawName = attrName || decodeURIComponent(pathname.split("/").pop() || "") || "download";
+      return { url: parsed.href, filename: rawName };
+    } catch (_) {
+      return null;
+    }
+  }
+
+  document.addEventListener("pointerdown", (event) => {
+    if (!interceptDownloadsEnabled || event.button !== 0) return;
+    const target = event.target instanceof Element ? event.target : null;
+    if (!target) return;
+    const actionable = target.closest("a[href], button, [role='button']");
+    if (actionable) {
+      try {
+        chrome.runtime.sendMessage({ action: "keepalive_ping" }, () => {
+          void chrome.runtime.lastError;
+        });
+      } catch (_) {}
+    }
+  }, { capture: true, passive: true });
+
+  document.addEventListener("click", (event) => {
+    if (event.defaultPrevented || event.button !== 0) return;
+    if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+    const target = event.target instanceof Element ? event.target : null;
+    if (!target || currentBar?.contains(target)) return;
+
+    const anchor = target.closest("a[href]");
+    const info = isInterceptableDownloadAnchor(anchor);
+    if (!info) return;
+
+    event.preventDefault();
+    event.stopPropagation();
+
+    chrome.runtime.sendMessage({
+      action: "download_media",
+      url: info.url,
+      filename: info.filename,
+      referrer: location.href
+    }, (response) => {
+      if (chrome.runtime.lastError || !response?.success || !response.taskId) {
+        showDownloadToast(info.filename, info.url, response?.error || "Không kết nối được App — hãy mở Internet Downloader");
+      }
+    });
+  }, true);
 
   // ==========================================
   // Thông điệp từ Background (Network Streams, Toasts, Grabber)

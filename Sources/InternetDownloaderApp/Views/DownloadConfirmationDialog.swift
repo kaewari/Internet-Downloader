@@ -149,6 +149,13 @@ public struct DownloadConfirmationDialog: View {
         }
         .padding(20)
         .frame(width: 500)
+        .onChange(of: task.filename) { newName in
+            let currentExt = (filename as NSString).pathExtension
+            let isOpaqueOrEmpty = filename.isEmpty || filename == "download" || FileTypeDetector.isOpaqueIdentifier(filename) || currentExt.isEmpty
+            if isOpaqueOrEmpty && !newName.isEmpty && newName != "download" && !FileTypeDetector.isOpaqueIdentifier(newName) {
+                filename = newName
+            }
+        }
         .task {
             isProbingSize = true
             let currentExt = (filename as NSString).pathExtension

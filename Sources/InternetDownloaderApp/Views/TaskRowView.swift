@@ -81,10 +81,12 @@ public struct TaskRowView: View {
 
                     // Quick Action Buttons
                     HStack(spacing: 6) {
-                        if task.status == .downloading {
+                        if task.status == .downloading || task.status == .pending {
                             Button(action: onPause) {
                                 Image(systemName: "pause.fill")
                                     .font(.system(size: 10))
+                                    .frame(width: 22, height: 22)
+                                    .contentShape(Rectangle())
                             }
                             .buttonStyle(.plain)
                             .help(task.browserInfo == nil ? "Tạm dừng" : "Hủy phiên tải trình duyệt")
@@ -92,6 +94,8 @@ public struct TaskRowView: View {
                             Button(action: onResume) {
                                 Image(systemName: "play.fill")
                                     .font(.system(size: 10))
+                                    .frame(width: 22, height: 22)
+                                    .contentShape(Rectangle())
                             }
                             .buttonStyle(.plain)
                             .help("Tiếp tục tải")
@@ -101,6 +105,8 @@ public struct TaskRowView: View {
                             Button(action: onOpen) {
                                 Image(systemName: "arrow.up.forward.app")
                                     .font(.system(size: 11))
+                                    .frame(width: 22, height: 22)
+                                    .contentShape(Rectangle())
                             }
                             .buttonStyle(.plain)
                             .help("Mở file")
@@ -108,6 +114,8 @@ public struct TaskRowView: View {
                             Button(action: onReveal) {
                                 Image(systemName: "folder")
                                     .font(.system(size: 11))
+                                    .frame(width: 22, height: 22)
+                                    .contentShape(Rectangle())
                             }
                             .buttonStyle(.plain)
                             .help("Hiển thị trong Finder")
@@ -117,6 +125,8 @@ public struct TaskRowView: View {
                             Image(systemName: "trash")
                                 .font(.system(size: 11))
                                 .foregroundColor(.secondary)
+                                .frame(width: 22, height: 22)
+                                .contentShape(Rectangle())
                         }
                         .buttonStyle(.plain)
                         .help("Xóa nhiệm vụ")
@@ -129,7 +139,7 @@ public struct TaskRowView: View {
         .background(isSelected ? Color.accentColor.opacity(0.12) : Color.clear)
         .cornerRadius(6)
         .contextMenu {
-            if task.status == .downloading {
+            if task.status == .downloading || task.status == .pending {
                 Button(action: onPause) {
                     Label("Tạm dừng", systemImage: "pause.fill")
                 }

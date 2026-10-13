@@ -73,6 +73,48 @@ const capturedMediaByTab = {};
 const tabUrls = {};
 const capturedHeadersByUrl = {};
 const capturedResponseMetaByUrl = {};
+const capturedRedirectByUrl = {};
+const interceptedDownloadIds = new Set();
+const interceptedDownloadMeta = new Map();
+const recentHandedOffUrls = new Map();
+let interceptDownloadsEnabled = true;
+
+function getRedirectChainUrls(...seedUrls) {
+  const seen = new Set();
+  const result = [];
+  for (const startUrl of seedUrls) {
+    let current = startUrl;
+    let hops = 0;
+    while (current && !seen.has(current) && hops < 10) {
+      seen.add(current);
+      result.push(current);
+      current = (typeof capturedRedirectByUrl !== "undefined" && capturedRedirectByUrl[current]) || "";
+      hops++;
+    }
+  }
+  return result;
+}
+
+function resolveRedirectTarget(url) {
+  if (!url || typeof capturedRedirectByUrl === "undefined") return url || "";
+  const chain = getRedirectChainUrls(url);
+  return chain.length > 0 ? chain[chain.length - 1] : url;
+}
+
+if (chrome.storage && chrome.storage.local) {
+  chrome.storage.local.get(["interceptDownloads"], (res) => {
+    if (res && res.interceptDownloads !== undefined) {
+      interceptDownloadsEnabled = Boolean(res.interceptDownloads);
+    }
+  });
+}
+if (chrome.storage && chrome.storage.onChanged) {
+  chrome.storage.onChanged.addListener((changes) => {
+    if (changes && changes.interceptDownloads !== undefined) {
+      interceptDownloadsEnabled = Boolean(changes.interceptDownloads.newValue);
+    }
+  });
+}
 
 function parseDispositionFilename(disposition) {
   if (!disposition || typeof disposition !== "string") return "";
@@ -143,19 +185,22 @@ function resolveBestFilename(data) {
     const base = String(data.filename).split(/[\\/]/).pop().trim();
     if (base && !isOpaqueFilename(base)) return base;
   }
-  const urls = [data.finalUrl, data.url, data.originalUrl].filter(Boolean);
-  for (const u of urls) {
-    const meta = capturedResponseMetaByUrl[u];
-    if (meta && meta.contentDisposition) {
-      const fromHeader = parseDispositionFilename(meta.contentDisposition);
-      if (fromHeader && !isOpaqueFilename(fromHeader)) return fromHeader;
+  const redirected = resolveRedirectTarget(data.originalUrl || data.url);
+  const urls = getRedirectChainUrls(data.finalUrl, redirected, data.url, data.originalUrl);
+  if (typeof capturedResponseMetaByUrl !== "undefined") {
+    for (const u of urls) {
+      const meta = capturedResponseMetaByUrl[u];
+      if (meta && meta.contentDisposition) {
+        const fromHeader = parseDispositionFilename(meta.contentDisposition);
+        if (fromHeader && !isOpaqueFilename(fromHeader)) return fromHeader;
+      }
     }
   }
   for (const u of urls) {
     const fromQuery = extractQueryFilename(u);
     if (fromQuery) return fromQuery;
   }
-  for (const u of [data.originalUrl, data.url, data.finalUrl].filter(Boolean)) {
+  for (const u of urls) {
     const lastPart = String(u).split("?")[0].split("#")[0].split("/").pop() || "";
     try {
       const decoded = decodeURIComponent(lastPart).trim();
@@ -170,61 +215,94 @@ function resolveBestFilename(data) {
   return "";
 }
 
-// Bắt sự kiện tải file của trình duyệt (Download Interception)
-chrome.downloads.onCreated.addListener(async (item) => {
-  chrome.storage.local.get(["interceptDownloads"], (res) => {
-    if (res.interceptDownloads === false) return;
-    // A browser transfer owns Chrome's Save flow. Leave all concurrent downloads
-    // alone until correlation/confirmation finishes; never cancel its input.
-    if (browserJobs.size || /^https:\/\/web\.telegram\.org\//i.test(item.url) || /^https:\/\/web\.telegram\.org\//i.test(item.referrer || '')) return;
+function interceptBrowserDownload(item) {
+  if (!interceptDownloadsEnabled || !item || !item.url) return false;
+  // A browser transfer owns Chrome's Save flow. Leave all concurrent downloads
+  // alone until correlation/confirmation finishes; never cancel its input.
+  if ((typeof browserJobs !== "undefined" && browserJobs.size) ||
+      /^https:\/\/web\.telegram\.org\//i.test(item.url) ||
+      /^https:\/\/web\.telegram\.org\//i.test(item.referrer || "")) {
+    return false;
+  }
 
-    // Không can thiệp nếu là blob URL hoặc data URL
-    if (item.url.startsWith("blob:") || item.url.startsWith("data:")) return;
+  // Không can thiệp nếu là blob URL hoặc data URL
+  if (item.url.startsWith("blob:") || item.url.startsWith("data:")) return false;
 
-    const targetUrl = item.finalUrl || item.url;
-    const initialBest = resolveBestFilename({
-      url: targetUrl,
-      originalUrl: item.url,
-      filename: item.filename || ""
-    });
+  // Hủy ngay lập tức và đồng bộ (0ms) để ngăn Chrome bật hộp thoại Save As của macOS
+  chrome.downloads.cancel(item.id, () => {
+    chrome.downloads.erase({ id: item.id }, () => {});
+  });
 
-    const finalizeInterception = (resolvedFilename) => {
-      chrome.downloads.cancel(item.id, () => {
-        chrome.downloads.erase({ id: item.id }, () => {});
-      });
+  const targetUrl = item.finalUrl || resolveRedirectTarget(item.url) || item.url;
+  const bestFilename = resolveBestFilename({
+    finalUrl: item.finalUrl || "",
+    url: targetUrl,
+    originalUrl: item.url,
+    filename: item.filename || ""
+  });
+
+  if (interceptedDownloadIds.has(item.id)) {
+    const prevMeta = interceptedDownloadMeta.get(item.id);
+    if (prevMeta && isOpaqueFilename(prevMeta.filename) && bestFilename && !isOpaqueFilename(bestFilename)) {
+      prevMeta.filename = bestFilename;
       sendDownloadToHost({
         url: targetUrl,
         originalUrl: item.url,
-        filename: resolvedFilename || initialBest || "",
+        filename: bestFilename,
         referrer: item.referrer || "",
         userAgent: navigator.userAgent
       });
-    };
-
-    if ((initialBest && !isOpaqueFilename(initialBest)) || !chrome.downloads.onChanged) {
-      finalizeInterception(initialBest);
-      return;
     }
+    return true;
+  }
+  interceptedDownloadIds.add(item.id);
+  interceptedDownloadMeta.set(item.id, { url: targetUrl, filename: bestFilename });
+  if (interceptedDownloadIds.size > 500) {
+    const oldest = interceptedDownloadIds.values().next().value;
+    interceptedDownloadIds.delete(oldest);
+    interceptedDownloadMeta.delete(oldest);
+  }
 
-    let settled = false;
-    const onChangedListener = (delta) => {
-      if (delta && delta.id === item.id && delta.filename && delta.filename.current) {
-        if (settled) return;
-        settled = true;
-        chrome.downloads.onChanged.removeListener(onChangedListener);
-        const chromeBase = String(delta.filename.current).split(/[\\/]/).pop().trim();
-        finalizeInterception(!isOpaqueFilename(chromeBase) ? chromeBase : initialBest);
+  const now = Date.now();
+  for (const candidateUrl of getRedirectChainUrls(targetUrl, item.url)) {
+    const recent = recentHandedOffUrls.get(candidateUrl);
+    if (recent && now - recent.ts < 3000) {
+      if (isOpaqueFilename(recent.filename) && bestFilename && !isOpaqueFilename(bestFilename)) {
+        recent.filename = bestFilename;
+        break;
       }
-    };
-    chrome.downloads.onChanged.addListener(onChangedListener);
-    setTimeout(() => {
-      if (settled) return;
-      settled = true;
-      chrome.downloads.onChanged.removeListener(onChangedListener);
-      finalizeInterception(initialBest);
-    }, 350);
+      return true;
+    }
+  }
+
+  sendDownloadToHost({
+    url: targetUrl,
+    originalUrl: item.url,
+    filename: bestFilename,
+    referrer: item.referrer || "",
+    userAgent: navigator.userAgent
   });
-});
+  return true;
+}
+
+// Bắt sự kiện tải file của trình duyệt đồng bộ ngay ở cả onDeterminingFilename và onCreated
+if (chrome.downloads && chrome.downloads.onDeterminingFilename) {
+  chrome.downloads.onDeterminingFilename.addListener((item, suggest) => {
+    if (interceptBrowserDownload(item)) {
+      return true;
+    }
+    if (typeof suggest === "function") {
+      suggest();
+    }
+    return false;
+  });
+}
+if (chrome.downloads && chrome.downloads.onCreated) {
+  chrome.downloads.onCreated.addListener((item) => {
+    interceptBrowserDownload(item);
+  });
+}
+
 
 // Thu thập request headers (Origin, Referer, Authorization, Sec-Fetch-*, x-*) để gửi sang App
 if (chrome.webRequest && chrome.webRequest.onBeforeSendHeaders) {
@@ -253,27 +331,39 @@ if (chrome.webRequest && chrome.webRequest.onBeforeSendHeaders) {
   );
 }
 
-const AD_DOMAINS = [
-  "adtng.com", "doubleclick.net", "googlesyndication.com", "adnxs.com",
-  "advertising.com", "taboola.com", "outbrain.com", "scorecardresearch.com",
-  "moatads.com", "serving-sys.com", "adroll.com", "rubiconproject.com",
-  "smartadserver.com", "trafficjunky.com", "exoclick.com", "popads.net"
-];
-
-const UI_SOUNDS = [
-  "no_input.mp3", "open.mp3", "close.mp3", "click.mp3", "pop.mp3",
-  "beep.mp3", "notify.mp3", "bell.mp3", "chime.mp3"
-];
+if (chrome.webRequest && chrome.webRequest.onBeforeRedirect) {
+  chrome.webRequest.onBeforeRedirect.addListener(
+    (details) => {
+      if (!details || !details.url || !details.redirectUrl || typeof capturedRedirectByUrl === "undefined") return;
+      capturedRedirectByUrl[details.url] = details.redirectUrl;
+      const keys = Object.keys(capturedRedirectByUrl);
+      if (keys.length > 500) delete capturedRedirectByUrl[keys[0]];
+    },
+    { urls: ["<all_urls>"] }
+  );
+}
 
 // Lắng nghe luồng dữ liệu media thực tế từ WebRequest
 if (chrome.webRequest && chrome.webRequest.onResponseStarted) {
+  const AD_DOMAINS = [
+    "adtng.com", "doubleclick.net", "googlesyndication.com", "adnxs.com",
+    "advertising.com", "taboola.com", "outbrain.com", "scorecardresearch.com",
+    "moatads.com", "serving-sys.com", "adroll.com", "rubiconproject.com",
+    "smartadserver.com", "trafficjunky.com", "exoclick.com", "popads.net"
+  ];
+
+  const UI_SOUNDS = [
+    "no_input.mp3", "open.mp3", "close.mp3", "click.mp3", "pop.mp3",
+    "beep.mp3", "notify.mp3", "bell.mp3", "chime.mp3"
+  ];
+
   chrome.webRequest.onResponseStarted.addListener(
     (details) => {
       if (!details) return;
       const url = details.url;
       if (!url || url.startsWith("blob:") || url.startsWith("data:") || url.startsWith("chrome-extension:")) return;
 
-      if (details.responseHeaders) {
+      if (details.responseHeaders && typeof capturedResponseMetaByUrl !== "undefined") {
         let disp = "";
         let ctype = "";
         for (const h of details.responseHeaders) {
@@ -481,6 +571,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
 
+  if (message.action === "keepalive_ping") {
+    sendResponse({ ok: true });
+    return false;
+  }
+
   if (message.action === "ping_host") {
     chrome.runtime.sendNativeMessage(HOST_NAME, { action: "hello", protocolVersion: 2 }, (response) => {
       if (chrome.runtime.lastError) {
@@ -529,11 +624,32 @@ function isSameBaseDomain(url1, url2) {
 
 // Gửi request tới Native Messaging Host của Internet Downloader
 function sendDownloadToHost(data, callback, tabId) {
-  const bestFilename = resolveBestFilename(data);
+  const bestFilename = typeof resolveBestFilename === "function" ? resolveBestFilename(data) : (data.filename || "");
   const filename = bestFilename || data.filename || data.url.split("/").pop().split("?")[0] || "Tệp tin";
+  const chainUrls = typeof getRedirectChainUrls === "function"
+    ? getRedirectChainUrls(data.originalUrl, data.url)
+    : [data.originalUrl, data.url].filter(Boolean);
+
+  if (typeof recentHandedOffUrls !== "undefined") {
+    const now = Date.now();
+    for (const u of chainUrls) {
+      if (u) recentHandedOffUrls.set(u, { ts: now, filename: bestFilename || data.filename || "" });
+    }
+    if (recentHandedOffUrls.size > 500) {
+      const oldestKey = recentHandedOffUrls.keys().next().value;
+      recentHandedOffUrls.delete(oldestKey);
+    }
+  }
 
   function proceed(cookies) {
-    const capturedHeaders = capturedHeadersByUrl[data.url] || {};
+    let capturedHeaders = {};
+    if (typeof capturedHeadersByUrl !== "undefined") {
+      for (const u of chainUrls) {
+        if (u && capturedHeadersByUrl[u]) {
+          capturedHeaders = { ...capturedHeaders, ...capturedHeadersByUrl[u] };
+        }
+      }
+    }
     const headers = { ...capturedHeaders };
     if (!headers["Referer"] && data.referrer) {
       headers["Referer"] = data.referrer;

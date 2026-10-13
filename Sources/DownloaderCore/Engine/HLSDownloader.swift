@@ -486,7 +486,10 @@ public actor HLSDownloader {
             onProgress(downloadedCount, totalSegments, downloadedBytesTotal, initialEst, 0, activeSegments)
 
             for try await (slotIndex, _, bytesCount) in group {
-                if isCancelled { break }
+                if isCancelled || Task.isCancelled {
+                    group.cancelAll()
+                    throw CancellationError()
+                }
                 downloadedCount += 1
                 downloadedBytesTotal += bytesCount
                 speedTracker.record(bytes: bytesCount)
@@ -498,7 +501,7 @@ public actor HLSDownloader {
 
                 onProgress(downloadedCount, totalSegments, downloadedBytesTotal, estimatedTotal, speed, activeSegments)
 
-                if !isCancelled, let nextSeg = advanceToNextUnfinishedSegment() {
+                if !isCancelled && !Task.isCancelled, let nextSeg = advanceToNextUnfinishedSegment() {
                     let dest = partFiles[nextSeg.index]
                     let currentSlot = slotIndex
                     activeSegments[currentSlot].status = .downloading
@@ -536,6 +539,10 @@ public actor HLSDownloader {
                     }
                 }
             }
+        }
+
+        if isCancelled || Task.isCancelled {
+            throw CancellationError()
         }
 
         // Concatenate all downloaded segments

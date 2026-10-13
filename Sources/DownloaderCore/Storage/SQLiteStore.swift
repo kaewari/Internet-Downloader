@@ -342,6 +342,16 @@ public final class SQLiteStore: @unchecked Sendable {
 
     public func deleteTask(id: UUID) throws {
         try queue.sync {
+            let idStr = id.uuidString
+
+            let deleteSegSql = "DELETE FROM segments WHERE task_id = ?;"
+            var segStmt: OpaquePointer?
+            if sqlite3_prepare_v2(db, deleteSegSql, -1, &segStmt, nil) == SQLITE_OK {
+                sqlite3_bind_text(segStmt, 1, (idStr as NSString).utf8String, -1, nil)
+                _ = sqlite3_step(segStmt)
+                sqlite3_finalize(segStmt)
+            }
+
             let sql = "DELETE FROM tasks WHERE id = ?;"
             var stmt: OpaquePointer?
             guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else {
@@ -349,7 +359,6 @@ public final class SQLiteStore: @unchecked Sendable {
             }
             defer { sqlite3_finalize(stmt) }
 
-            let idStr = id.uuidString
             sqlite3_bind_text(stmt, 1, (idStr as NSString).utf8String, -1, nil)
             if sqlite3_step(stmt) != SQLITE_DONE {
                 throw NSError(domain: "SQLiteStore", code: 8, userInfo: [NSLocalizedDescriptionKey: String(cString: sqlite3_errmsg(db))])
@@ -375,6 +384,28 @@ public final class SQLiteStore: @unchecked Sendable {
 
             if sqlite3_step(stmt) != SQLITE_DONE {
                 throw NSError(domain: "SQLiteStore", code: 15, userInfo: [NSLocalizedDescriptionKey: String(cString: sqlite3_errmsg(db))])
+            }
+        }
+    }
+
+    public func deleteCompletedAndFailedTasks() throws {
+        try queue.sync {
+            let deleteSegmentsSql = "DELETE FROM segments WHERE task_id IN (SELECT id FROM tasks WHERE status IN ('completed', 'failed'));"
+            var segStmt: OpaquePointer?
+            if sqlite3_prepare_v2(db, deleteSegmentsSql, -1, &segStmt, nil) == SQLITE_OK {
+                _ = sqlite3_step(segStmt)
+                sqlite3_finalize(segStmt)
+            }
+
+            let sql = "DELETE FROM tasks WHERE status IN ('completed', 'failed');"
+            var stmt: OpaquePointer?
+            guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else {
+                throw NSError(domain: "SQLiteStore", code: 16, userInfo: [NSLocalizedDescriptionKey: String(cString: sqlite3_errmsg(db))])
+            }
+            defer { sqlite3_finalize(stmt) }
+
+            if sqlite3_step(stmt) != SQLITE_DONE {
+                throw NSError(domain: "SQLiteStore", code: 17, userInfo: [NSLocalizedDescriptionKey: String(cString: sqlite3_errmsg(db))])
             }
         }
     }

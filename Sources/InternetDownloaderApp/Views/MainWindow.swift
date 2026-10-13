@@ -85,21 +85,23 @@ public struct MainWindow: View {
                     }
                     .help("Thêm liên kết tải mới")
 
-                    Button(action: { pauseAll() }) {
+                    Button(action: { viewModel.pauseAllTasks() }) {
                         Label("Tạm dừng tất cả", systemImage: "pause.circle")
                     }
                     .help("Tạm dừng tất cả tác vụ đang tải")
+                    .disabled(!viewModel.tasks.contains(where: { $0.status == .downloading || $0.status == .pending }))
 
-                    Button(action: { resumeAll() }) {
+                    Button(action: { viewModel.resumeAllTasks() }) {
                         Label("Tiếp tục tất cả", systemImage: "play.circle")
                     }
-                    .help("Tiếp tục tất cả tác vụ")
+                    .help("Tiếp tục tất cả tác vụ đã tạm dừng hoặc bị lỗi")
+                    .disabled(!viewModel.tasks.contains(where: { $0.status == .paused || $0.status == .failed || $0.status == .pending }))
 
-                    Button(action: { viewModel.clearFailedTasks() }) {
-                        Label("Dọn dẹp lỗi", systemImage: "trash.slash")
+                    Button(action: { viewModel.performToolbarCleanup() }) {
+                        Label("Dọn dẹp danh sách", systemImage: "trash.slash")
                     }
-                    .help("Dọn dẹp tất cả các tác vụ tải bị lỗi")
-                    .disabled(viewModel.tasks.filter { $0.status == .failed }.isEmpty)
+                    .help("Dọn dẹp tác vụ hoàn tất/lỗi hoặc xóa tác vụ đang chọn")
+                    .disabled(viewModel.tasks.isEmpty)
                 }
             }
         }
@@ -154,17 +156,5 @@ public struct MainWindow: View {
 
     private func fileExt(_ task: DownloadTask) -> String {
         URL(fileURLWithPath: task.filename).pathExtension.lowercased()
-    }
-
-    private func pauseAll() {
-        for t in viewModel.tasks where t.status == .downloading {
-            viewModel.pauseTask(t.id)
-        }
-    }
-
-    private func resumeAll() {
-        for t in viewModel.tasks where t.status == .paused {
-            viewModel.resumeTask(t.id)
-        }
     }
 }

@@ -393,6 +393,10 @@ public actor HTTPRangeDownloader {
             }
         }
 
+        if isPaused || isCancelled || Task.isCancelled {
+            throw CancellationError()
+        }
+
         // Clean up temporary checkpoint directory if any
         try? fileManager.removeItem(at: task.tempDirectory)
     }
@@ -465,42 +469,59 @@ public actor HTTPRangeDownloader {
         buffer.reserveCapacity(65536)
         var unrecordedBytes: Int64 = 0
 
-        for try await byte in bytes {
-            if isPaused || isCancelled {
-                if !buffer.isEmpty {
-                    try handle.write(contentsOf: buffer)
-                    currentSegment.downloadedBytes += Int64(buffer.count)
-                    unrecordedBytes += Int64(buffer.count)
-                    buffer.removeAll(keepingCapacity: true)
-                }
-                if unrecordedBytes > 0 {
-                    speedTracker.record(bytes: unrecordedBytes)
-                }
-                coordinator.markSegmentPaused(segment: currentSegment)
-                return currentSegment
-            }
-
-            buffer.append(byte)
-
-            if expectsMedia && currentSegment.startByte == 0 && currentSegment.downloadedBytes == 0 && buffer.count == 512 {
-                let prefix = String(decoding: buffer, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-                if prefix.hasPrefix("<!doctype html") || prefix.hasPrefix("<html") { throw URLError(.cannotDecodeContentData) }
-            }
-            if buffer.count >= 65536 {
+        let flushAndPauseSegment = { () throws -> DownloadSegment in
+            if !buffer.isEmpty {
                 try handle.write(contentsOf: buffer)
-                let count = Int64(buffer.count)
-                currentSegment.downloadedBytes += count
-                unrecordedBytes += count
+                currentSegment.downloadedBytes += Int64(buffer.count)
+                unrecordedBytes += Int64(buffer.count)
                 buffer.removeAll(keepingCapacity: true)
+            }
+            if unrecordedBytes > 0 {
+                self.speedTracker.record(bytes: unrecordedBytes)
+                unrecordedBytes = 0
+            }
+            coordinator.markSegmentPaused(segment: currentSegment)
+            return currentSegment
+        }
 
-                // Update speed stats once every 256KB to minimize mutex contention
-                if unrecordedBytes >= 262144 {
-                    speedTracker.record(bytes: unrecordedBytes)
-                    unrecordedBytes = 0
-                    let speed = speedTracker.currentSpeed()
-                    coordinator.recordProgress(segment: currentSegment, speed: speed)
+        do {
+            for try await byte in bytes {
+                if isPaused || isCancelled || Task.isCancelled {
+                    return try flushAndPauseSegment()
+                }
+
+                buffer.append(byte)
+
+                if expectsMedia && currentSegment.startByte == 0 && currentSegment.downloadedBytes == 0 && buffer.count == 512 {
+                    let prefix = String(decoding: buffer, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+                    if prefix.hasPrefix("<!doctype html") || prefix.hasPrefix("<html") { throw URLError(.cannotDecodeContentData) }
+                }
+                if buffer.count >= 65536 {
+                    try handle.write(contentsOf: buffer)
+                    let count = Int64(buffer.count)
+                    currentSegment.downloadedBytes += count
+                    unrecordedBytes += count
+                    buffer.removeAll(keepingCapacity: true)
+
+                    // Update speed stats once every 256KB to minimize mutex contention
+                    if unrecordedBytes >= 262144 {
+                        speedTracker.record(bytes: unrecordedBytes)
+                        unrecordedBytes = 0
+                        let speed = speedTracker.currentSpeed()
+                        coordinator.recordProgress(segment: currentSegment, speed: speed)
+                    }
                 }
             }
+        } catch {
+            if isPaused || isCancelled || Task.isCancelled || error is CancellationError || (error as? URLError)?.code == .cancelled {
+                _ = try? flushAndPauseSegment()
+                throw CancellationError()
+            }
+            throw error
+        }
+
+        if isPaused || isCancelled || Task.isCancelled {
+            return try flushAndPauseSegment()
         }
 
         if !buffer.isEmpty {

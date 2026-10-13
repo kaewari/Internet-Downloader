@@ -672,3 +672,286 @@ test('getBestStreamFromRecent avoids recordplay.biz/stream/ probe and picks work
   const selected = c.getBestStreamFromRecent(streams);
   assert.equal(selected, 'https://vwyn3lxe5fv5.cdn-centaurus.com/hls2/01/15125/20enthat5erf_,l,n,h,.urlset/master.m3u8', 'Must pick cdn-centaurus.com over recordplay.biz/stream/ honeypot');
 });
+
+test('downloads.onCreated and onDeterminingFilename cancel browser download synchronously to prevent native Save As dialog', () => {
+  const source = fs.readFileSync('Extension/background.js', 'utf8');
+  let onCreatedHandler = null;
+  let onDeterminingFilenameHandler = null;
+  const cancelledIds = [];
+  const erasedIds = [];
+  const sentToHost = [];
+
+  const c = vm.createContext({
+    importScripts: () => {},
+    browserJobs: new Map(),
+    URL,
+    navigator: { userAgent: 'Mozilla/5.0' },
+    setTimeout: () => { throw new Error('Must NOT use setTimeout delay before cancelling download'); },
+    clearTimeout: () => {},
+    chrome: {
+      runtime: {
+        onInstalled: { addListener: () => {} },
+        onMessage: { addListener: () => {} },
+        sendNativeMessage: (host, payload, cb) => {
+          sentToHost.push(payload);
+          if (cb) cb({ success: true, taskId: 'task-dmg-1' });
+        }
+      },
+      storage: {
+        local: {
+          // Simulate async storage.local.get that does NOT resolve synchronously
+          get: () => {}
+        },
+        onChanged: { addListener: () => {} }
+      },
+      contextMenus: {
+        create: () => {},
+        onClicked: { addListener: () => {} }
+      },
+      downloads: {
+        onCreated: { addListener: (fn) => { onCreatedHandler = fn; } },
+        onDeterminingFilename: { addListener: (fn) => { onDeterminingFilenameHandler = fn; } },
+        onChanged: { addListener: () => {}, removeListener: () => {} },
+        cancel: (id, cb) => { cancelledIds.push(id); if (cb) cb(); },
+        erase: (query, cb) => { erasedIds.push(query.id); if (cb) cb(); }
+      },
+      webRequest: {
+        onBeforeSendHeaders: { addListener: () => {} },
+        onBeforeRedirect: { addListener: () => {} },
+        onResponseStarted: { addListener: () => {} }
+      },
+      tabs: {
+        onRemoved: { addListener: () => {} },
+        onUpdated: { addListener: () => {} },
+        sendMessage: () => Promise.resolve()
+      },
+      webNavigation: {
+        onHistoryStateUpdated: { addListener: () => {} }
+      },
+      action: {
+        setBadgeText: () => {},
+        setBadgeBackgroundColor: () => {}
+      }
+    }
+  });
+
+  vm.runInContext(source, c);
+  assert(typeof onCreatedHandler === 'function', 'onCreated listener must be registered');
+  assert(typeof onDeterminingFilenameHandler === 'function', 'onDeterminingFilename listener must be registered');
+
+  // Simulate clicking a website download button where initial filename is empty and URL is opaque redirect
+  const downloadItem = {
+    id: 42,
+    url: 'https://example.com/download/latest',
+    finalUrl: 'https://cdn.example.com/releases/ArtCraft_0.41.0_universal.dmg',
+    filename: '',
+    referrer: 'https://example.com/'
+  };
+
+  onCreatedHandler(downloadItem);
+
+  // Must cancel and erase synchronously on the exact same tick (before Save As dialog can open)
+  assert.deepEqual(cancelledIds, [42], 'Must cancel download synchronously in onCreated');
+  assert.deepEqual(erasedIds, [42], 'Must erase download synchronously in onCreated');
+  assert.equal(sentToHost.length, 1, 'Must send intercepted download to native host immediately');
+  assert.equal(sentToHost[0].filename, 'ArtCraft_0.41.0_universal.dmg');
+
+  // If onDeterminingFilename also fires for the same download id, it must return true without calling suggest()
+  // and must NOT duplicate sendDownloadToHost
+  let suggestCalled = false;
+  const held = onDeterminingFilenameHandler(
+    { ...downloadItem, filename: 'ArtCraft_0.41.0_universal.dmg' },
+    () => { suggestCalled = true; }
+  );
+  assert.equal(held, true, 'onDeterminingFilename must return true to hold DownloadTargetDeterminer and block native Save As');
+  assert.equal(suggestCalled, false, 'onDeterminingFilename must not call suggest() when intercepting');
+  assert.equal(sentToHost.length, 1, 'Must not send duplicate download to native host for same download id');
+
+  // Non-interceptable blob: download must call suggest() and return false so browser handles it normally
+  let blobSuggestCalled = false;
+  const blobHeld = onDeterminingFilenameHandler(
+    { id: 43, url: 'blob:https://example.com/123', filename: 'file.bin' },
+    () => { blobSuggestCalled = true; }
+  );
+  assert.equal(blobHeld, false, 'Non-interceptable blob download must return false');
+  assert.equal(blobSuggestCalled, true, 'Non-interceptable blob download must call suggest()');
+});
+
+test('content.js isInterceptableDownloadAnchor intercepts <a download> and binary links while ignoring navigation links', () => {
+  const source = fs.readFileSync('Extension/content.js', 'utf8');
+  const start = source.indexOf('const DIRECT_DOWNLOAD_EXT_REGEX =');
+  const end = source.indexOf('document.addEventListener("pointerdown"', start);
+  assert(start > 0 && end > start, 'isInterceptableDownloadAnchor block must exist in content.js');
+
+  const snippet = source.slice(start, end);
+  function makeSandbox(hostname = 'artcraft.example.com', interceptEnabled = true) {
+    const c = vm.createContext({
+      URL,
+      decodeURIComponent,
+      interceptDownloadsEnabled: interceptEnabled,
+      location: {
+        hostname,
+        href: `https://${hostname}/download`
+      }
+    });
+    vm.runInContext(snippet, c);
+    return c;
+  }
+
+  function makeAnchor({ href, resolvedHref, downloadAttr = null }) {
+    return {
+      href: resolvedHref || href,
+      closest: () => null,
+      getAttribute: (name) => {
+        if (name === 'href') return href;
+        if (name === 'download') return downloadAttr;
+        return null;
+      },
+      hasAttribute: (name) => name === 'download' && downloadAttr !== null
+    };
+  }
+
+  const sb = makeSandbox();
+  // 1. Direct .dmg link without download attribute
+  const dmgInfo = sb.isInterceptableDownloadAnchor(makeAnchor({
+    href: 'https://cdn.example.com/releases/ArtCraft_0.41.0_universal.dmg?token=abc'
+  }));
+  assert.equal(dmgInfo?.url, 'https://cdn.example.com/releases/ArtCraft_0.41.0_universal.dmg?token=abc');
+  assert.equal(dmgInfo?.filename, 'ArtCraft_0.41.0_universal.dmg');
+
+  // 2. Opaque URL with explicit download attribute
+  const attrInfo = sb.isInterceptableDownloadAnchor(makeAnchor({
+    href: '/api/v1/release/latest',
+    resolvedHref: 'https://artcraft.example.com/api/v1/release/latest',
+    downloadAttr: 'ArtCraft_0.41.0_universal.dmg'
+  }));
+  assert.equal(attrInfo?.url, 'https://artcraft.example.com/api/v1/release/latest');
+  assert.equal(attrInfo?.filename, 'ArtCraft_0.41.0_universal.dmg');
+
+  // 3. Regular HTML navigation link must NOT be intercepted
+  const navInfo = sb.isInterceptableDownloadAnchor(makeAnchor({
+    href: 'https://artcraft.example.com/docs/getting-started'
+  }));
+  assert.equal(navInfo, null);
+
+  // 4. blob: link must NOT be intercepted
+  const blobInfo = sb.isInterceptableDownloadAnchor(makeAnchor({
+    href: 'blob:https://artcraft.example.com/uuid-123',
+    downloadAttr: 'file.dmg'
+  }));
+  assert.equal(blobInfo, null);
+
+  // 5. Disabled interceptDownloadsEnabled must NOT intercept
+  const sbDisabled = makeSandbox('artcraft.example.com', false);
+  assert.equal(sbDisabled.isInterceptableDownloadAnchor(makeAnchor({
+    href: 'https://cdn.example.com/ArtCraft.dmg'
+  })), null);
+});
+
+test('multi-hop redirects, opaque onCreated -> onDeterminingFilename upgrade, and content.js click deduplication', () => {
+  const source = fs.readFileSync('Extension/background.js', 'utf8');
+  const sentToHost = [];
+  let onCreatedHandler = null;
+  let onDeterminingFilenameHandler = null;
+  let onBeforeRedirectHandler = null;
+  let onResponseStartedHandler = null;
+  let onMessageHandler = null;
+
+  const c = vm.createContext({
+    URL,
+    Date,
+    Set,
+    Map,
+    Promise,
+    navigator: { userAgent: 'Mozilla/5.0 Test' },
+    importScripts: () => {},
+    chrome: {
+      runtime: {
+        onInstalled: { addListener: () => {} },
+        onMessage: { addListener: (fn) => { onMessageHandler = fn; } },
+        sendNativeMessage: (_host, payload, cb) => {
+          sentToHost.push(payload);
+          if (cb) cb({ success: true, taskId: 'task-1' });
+        }
+      },
+      storage: {
+        local: { get: (_keys, cb) => cb({ interceptDownloads: true }) },
+        onChanged: { addListener: () => {} }
+      },
+      contextMenus: {
+        create: () => {},
+        onClicked: { addListener: () => {} }
+      },
+      downloads: {
+        onCreated: { addListener: (fn) => { onCreatedHandler = fn; } },
+        onDeterminingFilename: { addListener: (fn) => { onDeterminingFilenameHandler = fn; } },
+        onChanged: { addListener: () => {}, removeListener: () => {} },
+        cancel: (_id, cb) => { if (cb) cb(); },
+        erase: (_query, cb) => { if (cb) cb(); }
+      },
+      webRequest: {
+        onBeforeSendHeaders: { addListener: () => {} },
+        onBeforeRedirect: { addListener: (fn) => { onBeforeRedirectHandler = fn; } },
+        onResponseStarted: { addListener: (fn) => { onResponseStartedHandler = fn; } }
+      },
+      tabs: {
+        onRemoved: { addListener: () => {} },
+        onUpdated: { addListener: () => {} },
+        sendMessage: () => Promise.resolve()
+      },
+      webNavigation: {
+        onHistoryStateUpdated: { addListener: () => {} }
+      },
+      action: {
+        setBadgeText: () => {},
+        setBadgeBackgroundColor: () => {}
+      }
+    }
+  });
+
+  vm.runInContext(source, c);
+
+  // 1. Multi-hop redirect A -> B -> C where C is an opaque UUID URL with Content-Disposition
+  const urlA = 'https://artcraft.example.com/download';
+  const urlB = 'https://auth.artcraft.example.com/Hop2';
+  const urlC = 'https://storage.example.com/blobs/9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d';
+  onBeforeRedirectHandler({ url: urlA, redirectUrl: urlB });
+  onBeforeRedirectHandler({ url: urlB, redirectUrl: urlC });
+  onResponseStartedHandler({
+    url: urlC,
+    tabId: 1,
+    statusCode: 200,
+    responseHeaders: [
+      { name: 'Content-Disposition', value: 'attachment; filename="ArtCraft_0.41.0_universal.dmg"' }
+    ]
+  });
+
+  onCreatedHandler({ id: 100, url: urlA, finalUrl: '', filename: '', referrer: 'https://artcraft.example.com/' });
+  assert.equal(sentToHost.length, 1);
+  assert.equal(sentToHost[0].url, urlC, 'Must follow multi-hop redirect chain A -> B -> C');
+  assert.equal(sentToHost[0].filename, 'ArtCraft_0.41.0_universal.dmg', 'Must resolve Content-Disposition from final hop C');
+
+  // 2. Opaque URL in onCreated (without Content-Disposition yet) followed by real filename in onDeterminingFilename
+  const opaqueUrl = 'https://storage.example.com/blobs/11111111-2222-3333-4444-555555555555';
+  onCreatedHandler({ id: 101, url: opaqueUrl, finalUrl: opaqueUrl, filename: '', referrer: 'https://artcraft.example.com/' });
+  assert.equal(sentToHost.length, 2);
+  assert.equal(sentToHost[1].filename, '');
+
+  onDeterminingFilenameHandler(
+    { id: 101, url: opaqueUrl, finalUrl: opaqueUrl, filename: '/Users/test/Downloads/ArtCraft_0.41.0_universal.dmg', referrer: 'https://artcraft.example.com/' },
+    () => {}
+  );
+  assert.equal(sentToHost.length, 3, 'Must upgrade opaque onCreated handoff when onDeterminingFilename provides real filename');
+  assert.equal(sentToHost[2].filename, 'ArtCraft_0.41.0_universal.dmg');
+
+  // 3. Deduplication: content.js sends download_media first, then chrome.downloads.onCreated fires for the same URL
+  const directDmgUrl = 'https://cdn.artcraft.example.com/ArtCraft_0.41.0_universal.dmg';
+  onMessageHandler(
+    { action: 'download_media', url: directDmgUrl, filename: 'ArtCraft_0.41.0_universal.dmg', referrer: 'https://artcraft.example.com/' },
+    { tab: { id: 1, url: 'https://artcraft.example.com/' } },
+    () => {}
+  );
+  assert.equal(sentToHost.length, 4);
+  onCreatedHandler({ id: 102, url: directDmgUrl, finalUrl: directDmgUrl, filename: 'ArtCraft_0.41.0_universal.dmg', referrer: 'https://artcraft.example.com/' });
+  assert.equal(sentToHost.length, 4, 'Must not send duplicate start_download when content.js already handed off the same URL');
+});

@@ -11,6 +11,7 @@ public final class DownloadManager: @unchecked Sendable {
     private var activeHLSTasks: [UUID: HLSDownloader] = [:]
     private var activeProcesses: [UUID: Process] = [:]
     private var activeTaskHandles: [UUID: Task<Void, Never>] = [:]
+    private var activeTaskTokens: [UUID: UUID] = [:]
     private let handleLock = NSLock()
     private let slots = DownloadSlots()
     private var browserTransfers: BrowserTransfers!
@@ -85,6 +86,50 @@ public final class DownloadManager: @unchecked Sendable {
 
                 let defaultDest = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first!
                 do {
+                    if let confirmation = self.onDownloadConfirmationRequested {
+                        let now = Date()
+                        let existingPending = self.getAllTasks().first { existing in
+                            guard existing.status == .pending,
+                                  existing.downloadedBytes == 0,
+                                  now.timeIntervalSince(existing.createdAt) < 5.0,
+                                  self.handleLock.withLock({ self.activeTaskHandles[existing.id] == nil }) else {
+                                return false
+                            }
+                            if existing.url == url { return true }
+                            if let reqRef = request.referrer, !reqRef.isEmpty, existing.url.absoluteString == reqRef {
+                                return true
+                            }
+                            return false
+                        }
+                        if var existing = existingPending {
+                            let incomingName = (request.filename ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                            let existingExt = (existing.filename as NSString).pathExtension
+                            let existingIsWeak = existing.filename.isEmpty
+                                || existing.filename == "download"
+                                || FileTypeDetector.isOpaqueIdentifier(existing.filename)
+                                || existingExt.isEmpty
+                            if !incomingName.isEmpty && incomingName != "download" && !FileTypeDetector.isOpaqueIdentifier(incomingName) && existingIsWeak {
+                                existing.filename = incomingName
+                            }
+                            if existing.url != url {
+                                existing.url = url
+                            }
+                            if let cookies = request.cookies, !cookies.isEmpty, (existing.cookies == nil || existing.cookies?.isEmpty == true) {
+                                existing.cookies = cookies
+                            }
+                            if let headers = request.headers, !headers.isEmpty, (existing.headers == nil || existing.headers?.isEmpty == true) {
+                                existing.headers = headers
+                            }
+                            if let ref = request.referrer, !ref.isEmpty, (existing.referrer == nil || existing.referrer?.isEmpty == true) {
+                                existing.referrer = ref
+                            }
+                            try self.store.saveTask(existing)
+                            self.onTasksChanged?()
+                            confirmation(existing)
+                            return IPCResponse(success: true, taskId: existing.id.uuidString, message: "Awaiting confirmation")
+                        }
+                    }
+
                     let task = try self.createNewTask(
                         url: url,
                         filename: request.filename ?? "",
@@ -227,6 +272,34 @@ public final class DownloadManager: @unchecked Sendable {
         return task
     }
 
+    private func isCancelledOrInactive(_ taskId: UUID) -> Bool {
+        if Task.isCancelled { return true }
+        guard let status = getTask(id: taskId)?.status else { return true }
+        return status == .paused
+    }
+
+    private func flushLiveSegmentsToStore(taskId: UUID) {
+        let finalSegments = handleLock.withLock {
+            _ = activeDownloaders.removeValue(forKey: taskId)
+            _ = lastDBSaveTime.removeValue(forKey: taskId)
+            return liveSegments.removeValue(forKey: taskId) ?? []
+        }
+        guard !finalSegments.isEmpty, var existingTask = try? store.getTask(id: taskId) else { return }
+        var segs = finalSegments
+        var sumDownloaded: Int64 = 0
+        for i in 0..<segs.count {
+            if segs[i].status == .downloading {
+                segs[i].status = .paused
+            }
+            sumDownloaded += segs[i].downloadedBytes
+        }
+        try? store.saveSegments(segs)
+        if sumDownloaded > existingTask.downloadedBytes {
+            existingTask.downloadedBytes = sumDownloaded
+            try? store.saveTask(existingTask)
+        }
+    }
+
     public func startDownload(taskId: UUID) {
         guard let task = getTask(id: taskId) else { return }
         if task.browserInfo != nil || URLNormalizer.normalize(task.url.absoluteString) == nil {
@@ -234,19 +307,47 @@ public final class DownloadManager: @unchecked Sendable {
             try? store.saveTask(failed); onTasksChanged?(); return
         }
 
-        let previous = handleLock.withLock { activeTaskHandles[taskId] }
+        let token = UUID()
+        let previous = handleLock.withLock {
+            let prev = activeTaskHandles[taskId]
+            activeTaskTokens[taskId] = token
+            return prev
+        }
         previous?.cancel()
         var pending = task; pending.status = .pending; pending.errorMessage = nil
         try? store.saveTask(pending); onTasksChanged?()
 
         let handle = Task { [weak self] in
             guard let self = self else { return }
+            defer {
+                self.handleLock.withLock {
+                    if self.activeTaskTokens[taskId] == token {
+                        self.activeTaskHandles.removeValue(forKey: taskId)
+                        self.activeTaskTokens.removeValue(forKey: taskId)
+                    }
+                }
+            }
             await previous?.value
+            if Task.isCancelled { return }
+            guard var latestPending = self.getTask(id: taskId), latestPending.status != .paused else { return }
+            if latestPending.status != .pending {
+                latestPending.status = .pending
+                latestPending.errorMessage = nil
+                try? self.store.saveTask(latestPending)
+                self.onTasksChanged?()
+            }
             do {
                 try await self.slots.acquire(taskId)
-                if Task.isCancelled { await self.slots.release(taskId); return }
-                self.onDownloadStarted?(task)
-                await self.executeDownload(task: task)
+                if self.isCancelledOrInactive(taskId) {
+                    await self.slots.release(taskId)
+                    return
+                }
+                guard let latestTask = self.getTask(id: taskId) else {
+                    await self.slots.release(taskId)
+                    return
+                }
+                self.onDownloadStarted?(latestTask)
+                await self.executeDownload(task: latestTask)
                 await self.slots.release(taskId)
             } catch { /* A cancelled queued job never starts transport. */ }
         }
@@ -254,6 +355,7 @@ public final class DownloadManager: @unchecked Sendable {
     }
 
     private func executeDownload(task: DownloadTask) async {
+        if isCancelledOrInactive(task.id) { return }
         var currentTask = task
         currentTask.status = .downloading
         currentTask.errorMessage = nil
@@ -271,7 +373,7 @@ public final class DownloadManager: @unchecked Sendable {
                     segments: [],
                     onProgress: { [weak self] downloaded, _ in
                         guard let self = self else { return }
-                        if var t = try? self.store.getTask(id: taskId) {
+                        if var t = try? self.store.getTask(id: taskId), t.status != .paused {
                             t.downloadedBytes = downloaded
                             t.totalBytes = downloaded
                             try? self.store.saveTask(t)
@@ -279,7 +381,7 @@ public final class DownloadManager: @unchecked Sendable {
                     },
                     onSegmentUpdate: { _ in }
                 )
-                if !Task.isCancelled, var completed = try? store.getTask(id: currentTask.id) {
+                if !Task.isCancelled, var completed = try? store.getTask(id: currentTask.id), completed.status != .paused {
                     completed.status = .completed
                     completed.speed = 0
                     if completed.downloadedBytes > 0 {
@@ -292,7 +394,7 @@ public final class DownloadManager: @unchecked Sendable {
                 onTasksChanged?()
                 return
             } catch {
-                if !Task.isCancelled, var failed = try? store.getTask(id: currentTask.id) {
+                if !(error is CancellationError), !Task.isCancelled, var failed = try? store.getTask(id: currentTask.id), failed.status != .paused {
                     failed.status = .failed
                     failed.errorMessage = error.localizedDescription
                     try? store.saveTask(failed)
@@ -316,6 +418,7 @@ public final class DownloadManager: @unchecked Sendable {
                 userAgent: currentTask.userAgent,
                 cookies: currentTask.cookies
             )
+            if isCancelledOrInactive(currentTask.id) { return }
             if resolved.directURL != currentTask.url {
                 currentTask.url = resolved.directURL
                 if currentTask.filename == "download" || currentTask.filename.isEmpty {
@@ -337,6 +440,8 @@ public final class DownloadManager: @unchecked Sendable {
             }
         }
 
+        if isCancelledOrInactive(currentTask.id) { return }
+
         // 3. Check if MPEG-DASH (.mpd) stream
         let isDASH = currentTask.url.pathExtension.lowercased() == "mpd" || currentTask.url.absoluteString.contains(".mpd")
         if isDASH {
@@ -345,6 +450,10 @@ public final class DownloadManager: @unchecked Sendable {
                     try await downloadWithYtDlp(binaryPath: ytdlp, task: currentTask)
                     return
                 } catch {
+                    if error is CancellationError || isCancelledOrInactive(currentTask.id) {
+                        onTasksChanged?()
+                        return
+                    }
                     // Fall back to standard range probe if yt-dlp fails
                 }
             }
@@ -364,6 +473,8 @@ public final class DownloadManager: @unchecked Sendable {
                 cookies: currentTask.cookies,
                 userAgent: currentTask.userAgent
             )
+
+            if isCancelledOrInactive(currentTask.id) { return }
 
             currentTask.totalBytes = probe.totalBytes
             currentTask.acceptRanges = probe.acceptRanges
@@ -408,6 +519,7 @@ public final class DownloadManager: @unchecked Sendable {
                 segments: segments,
                 onProgress: { [weak self] downloadedBytes, speed in
                     guard let self = self else { return }
+                    if (try? self.store.getTask(id: taskId))?.status == .paused { return }
                     let currentSegments = self.handleLock.withLock { self.liveSegments[taskId] ?? [] }
                     let completedCount = currentSegments.filter { $0.status == .completed }.count
                     let totalBytes = (try? self.store.getTask(id: taskId))?.totalBytes ?? initialTotalBytes
@@ -416,14 +528,16 @@ public final class DownloadManager: @unchecked Sendable {
                     let lastSave = self.handleLock.withLock { self.lastDBSaveTime[taskId] ?? 0 }
                     if now - lastSave >= 1.0 || (completedCount == currentSegments.count && !currentSegments.isEmpty) {
                         self.handleLock.withLock { self.lastDBSaveTime[taskId] = now }
-                        if var t = try? self.store.getTask(id: taskId) {
+                        if var t = try? self.store.getTask(id: taskId), t.status != .paused {
                             t.downloadedBytes = max(t.downloadedBytes, downloadedBytes)
                             t.speed = speed
                             t.downloadedSegmentsCount = completedCount
                             t.segmentsCount = currentSegments.count
                             try? self.store.saveTask(t)
                         }
-                        try? self.store.saveSegments(currentSegments)
+                        if !currentSegments.isEmpty {
+                            try? self.store.saveSegments(currentSegments)
+                        }
                     }
 
                     self.onTaskProgressUpdated?(taskId, downloadedBytes, totalBytes, completedCount, currentSegments.count, speed, currentSegments)
@@ -463,18 +577,28 @@ public final class DownloadManager: @unchecked Sendable {
                     }
                 }
 
-                let finalSegments = handleLock.withLock { liveSegments[taskId] ?? [] }
+                let finalSegments = handleLock.withLock {
+                    _ = activeDownloaders.removeValue(forKey: taskId)
+                    _ = lastDBSaveTime.removeValue(forKey: taskId)
+                    return liveSegments.removeValue(forKey: taskId) ?? []
+                }
                 try store.saveTask(completedTask)
                 if !finalSegments.isEmpty {
                     try? store.saveSegments(finalSegments)
                 }
                 onDownloadCompleted?(completedTask)
+            } else {
+                flushLiveSegmentsToStore(taskId: taskId)
             }
-            _ = handleLock.withLock { activeDownloaders.removeValue(forKey: taskId) }
             onTasksChanged?()
         } catch {
             let taskId = currentTask.id
-            _ = handleLock.withLock { activeDownloaders.removeValue(forKey: taskId) }
+            flushLiveSegmentsToStore(taskId: taskId)
+            let isURLCancelled = (error as? URLError)?.code == .cancelled
+            if error is CancellationError || isURLCancelled || isCancelledOrInactive(taskId) {
+                onTasksChanged?()
+                return
+            }
             var finalError = error
             let ext = currentTask.url.pathExtension.lowercased()
             let isMediaCandidate = [
@@ -482,11 +606,16 @@ public final class DownloadManager: @unchecked Sendable {
                 "mp3", "wav", "flac", "aac", "m4a", "ogg"
             ].contains(ext) || URLNormalizer.isVideoPlatformURL(currentTask.url)
 
-            if isMediaCandidate, let ytdlp = MediaURLResolver.findYtDlpBinary(), !Task.isCancelled {
+            if isMediaCandidate, let ytdlp = MediaURLResolver.findYtDlpBinary(), !isCancelledOrInactive(taskId) {
                 do {
                     try await downloadWithYtDlp(binaryPath: ytdlp, task: currentTask)
                     return
                 } catch {
+                    let isSubCancelled = (error as? URLError)?.code == .cancelled
+                    if error is CancellationError || isSubCancelled || isCancelledOrInactive(taskId) {
+                        onTasksChanged?()
+                        return
+                    }
                     finalError = error
                 }
             }
@@ -502,6 +631,7 @@ public final class DownloadManager: @unchecked Sendable {
 
     private func executeHLSDownload(task: DownloadTask, customHeaders: [String: String]? = nil) async {
         let taskId = task.id
+        if isCancelledOrInactive(taskId) { return }
         let hlsDownloader = HLSDownloader()
         handleLock.withLock { activeHLSTasks[taskId] = hlsDownloader }
 
@@ -517,6 +647,7 @@ public final class DownloadManager: @unchecked Sendable {
                 customHeaders: customHeaders ?? task.headers,
                 onProgress: { [weak self] downloadedSegs, totalSegs, downloadedBytes, estimatedTotalBytes, speed, activeSegments in
                     guard let self = self else { return }
+                    if (try? self.store.getTask(id: taskId))?.status == .paused { return }
                     self.handleLock.withLock {
                         self.liveSegments[taskId] = activeSegments
                     }
@@ -524,7 +655,7 @@ public final class DownloadManager: @unchecked Sendable {
                     let lastSave = self.handleLock.withLock { self.lastDBSaveTime[taskId] ?? 0 }
                     if now - lastSave >= 1.0 || downloadedSegs == totalSegs {
                         self.handleLock.withLock { self.lastDBSaveTime[taskId] = now }
-                        if var t = try? self.store.getTask(id: taskId) {
+                        if var t = try? self.store.getTask(id: taskId), t.status != .paused {
                             t.downloadedBytes = downloadedBytes
                             t.totalBytes = estimatedTotalBytes
                             t.downloadedSegmentsCount = downloadedSegs
@@ -532,12 +663,15 @@ public final class DownloadManager: @unchecked Sendable {
                             t.speed = speed
                             try? self.store.saveTask(t)
                         }
+                        if !activeSegments.isEmpty {
+                            try? self.store.saveSegments(activeSegments)
+                        }
                     }
                     self.onTaskProgressUpdated?(taskId, downloadedBytes, estimatedTotalBytes, downloadedSegs, totalSegs, speed, activeSegments)
                 }
             )
 
-            if !Task.isCancelled, var completed = try? store.getTask(id: taskId) {
+            if !Task.isCancelled, var completed = try? store.getTask(id: taskId), completed.status != .paused {
                 completed.status = .completed
                 completed.speed = 0
                 if let attrs = try? FileManager.default.attributesOfItem(atPath: task.finalFilePath.path),
@@ -560,12 +694,18 @@ public final class DownloadManager: @unchecked Sendable {
                 liveSegments.removeValue(forKey: taskId)
                 lastDBSaveTime.removeValue(forKey: taskId)
             }
+            let isURLCancelled = (error as? URLError)?.code == .cancelled
+            if error is CancellationError || isURLCancelled || isCancelledOrInactive(taskId) {
+                onTasksChanged?()
+                return
+            }
             var finalError = error
 
             // Self-healing: If 403 Forbidden occurred on an embed/probe stream (e.g. recordplay.biz/stream/...):
             if let ref = task.referrer, let embedURL = URL(string: ref),
                (ref.contains("recordplay.biz/e/") || task.url.host?.contains("recordplay.biz") == true) {
                 if let resolved = await MediaURLResolver.resolveEmbedStream(embedURL: embedURL) {
+                    if isCancelledOrInactive(taskId) { return }
                     if resolved.directURL != task.url {
                         var updatedTask = task
                         updatedTask.url = resolved.directURL
@@ -580,11 +720,16 @@ public final class DownloadManager: @unchecked Sendable {
                 }
             }
 
-            if let ytdlp = MediaURLResolver.findYtDlpBinary(), !Task.isCancelled {
+            if let ytdlp = MediaURLResolver.findYtDlpBinary(), !isCancelledOrInactive(taskId) {
                 do {
                     try await downloadWithYtDlp(binaryPath: ytdlp, task: task)
                     return
                 } catch {
+                    let isSubCancelled = (error as? URLError)?.code == .cancelled
+                    if error is CancellationError || isSubCancelled || isCancelledOrInactive(taskId) {
+                        onTasksChanged?()
+                        return
+                    }
                     finalError = error
                 }
             }
@@ -600,6 +745,9 @@ public final class DownloadManager: @unchecked Sendable {
 
     private func downloadWithYtDlp(binaryPath: String, task: DownloadTask) async throws {
         let taskId = task.id
+        if isCancelledOrInactive(taskId) {
+            throw CancellationError()
+        }
         var currentTask = task
 
         var targetFile = task.finalFilePath
@@ -609,7 +757,9 @@ public final class DownloadManager: @unchecked Sendable {
             let clean = (baseName.isEmpty || baseName == "master" || baseName == "index") ? "video" : baseName
             targetFile = task.destinationFolder.appendingPathComponent("\(clean).mp4")
             currentTask.filename = targetFile.lastPathComponent
-            try? store.saveTask(currentTask)
+            if !isCancelledOrInactive(taskId) {
+                try? store.saveTask(currentTask)
+            }
         }
 
         let targetDir = targetFile.deletingLastPathComponent()
@@ -627,7 +777,7 @@ public final class DownloadManager: @unchecked Sendable {
 
         var args = [
             "--no-warnings",
-            "--force-overwrites",
+            "--continue",
             "--hls-use-mpegts",
             "-N", "4",
             "--newline",
@@ -691,6 +841,10 @@ public final class DownloadManager: @unchecked Sendable {
 
         outPipe.fileHandleForReading.readabilityHandler = nil
 
+        if isCancelledOrInactive(taskId) {
+            throw CancellationError()
+        }
+
         guard proc.terminationStatus == 0 else {
             let errData = errPipe.fileHandleForReading.readDataToEndOfFile()
             let rawErrMsg = String(data: errData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
@@ -729,11 +883,13 @@ public final class DownloadManager: @unchecked Sendable {
                let match = items.first(where: { $0.hasPrefix(baseName) && !$0.hasSuffix(".part") }) {
                 targetFile = task.destinationFolder.appendingPathComponent(match)
                 currentTask.filename = match
-                try? store.saveTask(currentTask)
+                if !isCancelledOrInactive(taskId) {
+                    try? store.saveTask(currentTask)
+                }
             }
         }
 
-        if !Task.isCancelled, var completed = try? store.getTask(id: taskId) {
+        if !Task.isCancelled, var completed = try? store.getTask(id: taskId), completed.status != .paused {
             completed.status = .completed
             completed.speed = 0
             if let attrs = try? FileManager.default.attributesOfItem(atPath: targetFile.path),
@@ -794,7 +950,7 @@ public final class DownloadManager: @unchecked Sendable {
             let fragSub = String(line[fragRange])
             let digits = fragSub.components(separatedBy: CharacterSet.decimalDigits.inverted).filter { !$0.isEmpty }
             if digits.count >= 2, let cur = Int(digits[0]), let tot = Int(digits[1]) {
-                if var t = try? store.getTask(id: taskId) {
+                if var t = try? store.getTask(id: taskId), t.status != .paused {
                     t.downloadedSegmentsCount = cur
                     t.segmentsCount = tot
                     try? store.saveTask(t)
@@ -802,7 +958,7 @@ public final class DownloadManager: @unchecked Sendable {
             }
         }
 
-        if var t = try? store.getTask(id: taskId) {
+        if var t = try? store.getTask(id: taskId), t.status != .paused {
             if totalBytes > 0 { t.totalBytes = totalBytes }
             if downloadedBytes > 0 { t.downloadedBytes = downloadedBytes }
             t.speed = speed
@@ -815,6 +971,26 @@ public final class DownloadManager: @unchecked Sendable {
         if getTask(id: taskId)?.browserInfo != nil {
             Task { await browserTransfers.cancel(taskId) }; return
         }
+        let currentSegments = handleLock.withLock { liveSegments[taskId] }
+        var sumDownloaded: Int64 = 0
+        if var segs = currentSegments, !segs.isEmpty {
+            for i in 0..<segs.count {
+                if segs[i].status == .downloading {
+                    segs[i].status = .paused
+                }
+                sumDownloaded += segs[i].downloadedBytes
+            }
+            try? store.saveSegments(segs)
+        }
+        if var task = getTask(id: taskId) {
+            task.status = .paused
+            task.speed = 0
+            if sumDownloaded > task.downloadedBytes {
+                task.downloadedBytes = sumDownloaded
+            }
+            try? store.saveTask(task)
+        }
+        handleLock.withLock { activeTaskHandles[taskId]?.cancel() }
         if let downloader = handleLock.withLock({ activeDownloaders[taskId] }) {
             Task { await downloader.pause() }
         }
@@ -822,20 +998,25 @@ public final class DownloadManager: @unchecked Sendable {
         if let proc = handleLock.withLock({ activeProcesses[taskId] }) {
             proc.terminate()
         }
-        handleLock.withLock { activeTaskHandles[taskId]?.cancel() }
-        handleLock.withLock {
-            activeDownloaders.removeValue(forKey: taskId)
-            activeHLSTasks.removeValue(forKey: taskId)
-            activeProcesses.removeValue(forKey: taskId)
-            liveSegments.removeValue(forKey: taskId)
-            lastDBSaveTime.removeValue(forKey: taskId)
-        }
+        onTasksChanged?()
+    }
 
-        if var task = getTask(id: taskId) {
-            task.status = .paused
-            task.speed = 0
-            try? store.saveTask(task)
-            onTasksChanged?()
+    public func pauseAllTasks() {
+        let active = getAllTasks().filter { $0.status == .downloading || $0.status == .pending }
+        for task in active {
+            pauseDownload(taskId: task.id)
+        }
+    }
+
+    public func resumeAllTasks() {
+        let activeIds = handleLock.withLock {
+            Set(activeTaskHandles.filter { !$0.value.isCancelled }.keys)
+        }
+        let resumable = getAllTasks().filter {
+            $0.status == .paused || $0.status == .failed || ($0.status == .pending && !activeIds.contains($0.id))
+        }
+        for task in resumable {
+            startDownload(taskId: task.id)
         }
     }
 
@@ -848,11 +1029,20 @@ public final class DownloadManager: @unchecked Sendable {
             }
             return
         }
+        let task = getTask(id: taskId)
+        let runningHandle = handleLock.withLock { activeTaskHandles[taskId] }
         pauseDownload(taskId: taskId)
-        if let task = getTask(id: taskId) {
-            try? FileManager.default.removeItem(at: task.tempDirectory)
+        if let task = task {
+            let tempDir = task.tempDirectory
+            try? FileManager.default.removeItem(at: tempDir)
             try? store.deleteTask(id: taskId)
             onTasksChanged?()
+            if let runningHandle = runningHandle {
+                Task {
+                    await runningHandle.value
+                    try? FileManager.default.removeItem(at: tempDir)
+                }
+            }
         }
     }
 
@@ -863,6 +1053,52 @@ public final class DownloadManager: @unchecked Sendable {
         }
         try store.deleteFailedTasks()
         onTasksChanged?()
+    }
+
+    public func clearCompletedAndFailedTasks() throws {
+        let removable = getAllTasks().filter { $0.status == .completed || $0.status == .failed }
+        for task in removable {
+            try? FileManager.default.removeItem(at: task.tempDirectory)
+        }
+        try store.deleteCompletedAndFailedTasks()
+        onTasksChanged?()
+    }
+
+    public func shutdown() {
+        pauseAllTasks()
+
+        let handles = handleLock.withLock {
+            let h = Array(activeTaskHandles.values)
+            activeTaskHandles.removeAll()
+            activeTaskTokens.removeAll()
+            return h
+        }
+        for h in handles { h.cancel() }
+
+        let downloaders = handleLock.withLock {
+            let d = Array(activeDownloaders.values)
+            activeDownloaders.removeAll()
+            return d
+        }
+        for d in downloaders { Task { await d.pause() } }
+
+        let hlsTasks = handleLock.withLock {
+            let h = Array(activeHLSTasks.values)
+            activeHLSTasks.removeAll()
+            return h
+        }
+        for h in hlsTasks { Task { await h.cancel() } }
+
+        let procs = handleLock.withLock {
+            let p = Array(activeProcesses.values)
+            activeProcesses.removeAll()
+            return p
+        }
+        for p in procs where p.isRunning {
+            p.terminate()
+        }
+
+        stopIPC()
     }
 
     public func updateTaskURL(taskId: UUID, newURL: URL, newReferrer: String? = nil) throws {

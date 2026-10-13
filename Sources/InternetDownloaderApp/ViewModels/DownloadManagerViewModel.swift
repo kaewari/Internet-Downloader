@@ -69,7 +69,7 @@ public final class DownloadManagerViewModel: ObservableObject {
                 self.pendingConfirmationTask = task
                 NSSound(named: "Glass")?.play()
                 NSApp.activate(ignoringOtherApps: true)
-                if let window = NSApp.windows.first {
+                if let window = NSApp.windows.first(where: { $0.styleMask.contains(.titled) && !$0.isSheet && !($0 is NSPanel) }) ?? NSApp.windows.first {
                     window.makeKeyAndOrderFront(nil)
                 }
             }
@@ -82,7 +82,7 @@ public final class DownloadManagerViewModel: ObservableObject {
                 self.selectedTaskId = task.id
                 NSSound(named: "Glass")?.play()
                 NSApp.activate(ignoringOtherApps: true)
-                if let window = NSApp.windows.first {
+                if let window = NSApp.windows.first(where: { $0.styleMask.contains(.titled) && !$0.isSheet && !($0 is NSPanel) }) ?? NSApp.windows.first {
                     window.makeKeyAndOrderFront(nil)
                 }
                 self.sendSystemNotification(title: "Internet Downloader", body: "Bắt đầu tải: \(task.filename)")
@@ -124,6 +124,7 @@ public final class DownloadManagerViewModel: ObservableObject {
     }
 
     public func startClipboardMonitoring() {
+        lastSeenClipboardURL = NSPasteboard.general.string(forType: .string)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         clipboardTimer = Timer.scheduledTimer(withTimeInterval: 1.5, repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in
                 guard let self = self else { return }
@@ -154,14 +155,15 @@ public final class DownloadManagerViewModel: ObservableObject {
                     let oldPath = task.finalFilePath
                     task.filename = extracted
                     let newPath = task.finalFilePath
-                    if FileManager.default.fileExists(atPath: oldPath.path) && oldPath != newPath {
+                    if task.status == .completed && FileManager.default.fileExists(atPath: oldPath.path) && oldPath != newPath {
                         try? FileManager.default.moveItem(at: oldPath, to: newPath)
                     }
                     try? manager.store.saveTask(task)
                     allTasks[i] = task
-                } else if FileManager.default.fileExists(atPath: task.finalFilePath.path),
+                } else if task.status == .completed,
+                          FileManager.default.fileExists(atPath: task.finalFilePath.path),
                           let detectedExt = FileTypeDetector.detectExtension(fileURL: task.finalFilePath) {
-                    // 2. Try disk magic bytes
+                    // 2. Try disk magic bytes (only after task is completed)
                     let oldPath = task.finalFilePath
                     let baseName = (task.filename as NSString).deletingPathExtension
                     let newFilename = ext.isEmpty ? "\(task.filename).\(detectedExt)" : "\(baseName).\(detectedExt)"
@@ -282,16 +284,47 @@ public final class DownloadManagerViewModel: ObservableObject {
         refreshTasks()
     }
 
+    public func pauseAllTasks() {
+        manager.pauseAllTasks()
+        refreshTasks()
+    }
+
+    public func resumeAllTasks() {
+        manager.resumeAllTasks()
+        refreshTasks()
+    }
+
     public func clearFailedTasks() {
         do {
             try manager.clearFailedTasks()
+            refreshTasks()
             if let sel = selectedTaskId, !tasks.contains(where: { $0.id == sel }) {
                 selectedTaskId = nil
                 selectedTaskSegments = []
             }
-            refreshTasks()
         } catch {
             print("Failed to clear failed tasks: \(error)")
+        }
+    }
+
+    public func clearCompletedAndFailedTasks() {
+        do {
+            try manager.clearCompletedAndFailedTasks()
+            refreshTasks()
+            if let sel = selectedTaskId, !tasks.contains(where: { $0.id == sel }) {
+                selectedTaskId = nil
+                selectedTaskSegments = []
+            }
+        } catch {
+            print("Failed to clear completed and failed tasks: \(error)")
+        }
+    }
+
+    public func performToolbarCleanup() {
+        if tasks.contains(where: { $0.status == .completed || $0.status == .failed }) {
+            clearCompletedAndFailedTasks()
+        } else if let target = selectedTask {
+            deleteTask(target.id)
         }
     }
 
