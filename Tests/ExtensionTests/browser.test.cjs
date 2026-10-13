@@ -672,3 +672,190 @@ test('getBestStreamFromRecent avoids recordplay.biz/stream/ probe and picks work
   const selected = c.getBestStreamFromRecent(streams);
   assert.equal(selected, 'https://vwyn3lxe5fv5.cdn-centaurus.com/hls2/01/15125/20enthat5erf_,l,n,h,.urlset/master.m3u8', 'Must pick cdn-centaurus.com over recordplay.biz/stream/ honeypot');
 });
+
+test('Bug 1 (Image 1): onResponseStarted ignores googlevideo.com/videoplayback MSE chunks and deduplicates stream URLs', () => {
+  const source = fs.readFileSync('Extension/background.js', 'utf8');
+  const c = vm.createContext({
+    URL,
+    chrome: {
+      webRequest: {
+        onResponseStarted: {
+          addListener: (fn) => { c.handler = fn; }
+        }
+      },
+      action: { setBadgeText: () => {}, setBadgeBackgroundColor: () => {} },
+      tabs: { sendMessage: () => Promise.resolve() }
+    },
+    capturedMediaByTab: {},
+    capturedResponseMetaByUrl: {},
+    AD_DOMAINS: [],
+    UI_SOUNDS: [],
+    tabUrls: { 1: 'https://www.youtube.com/watch?v=stream123' }
+  });
+
+  const startIdx = source.indexOf('function isStreamSegmentOrChunk(') >= 0
+    ? source.indexOf('function isStreamSegmentOrChunk(')
+    : source.indexOf('if (chrome.webRequest && chrome.webRequest.onResponseStarted)');
+  const endIdx = source.indexOf('// Xóa danh sách khi đóng tab');
+  vm.runInContext(source.slice(startIdx, endIdx), c);
+
+  // Simulate 20 YouTube stream MSE chunk requests with different range/rn/rbuf/sq parameters
+  for (let i = 1; i <= 20; i++) {
+    c.handler({
+      tabId: 1,
+      url: `https://rr1---sn-g530uxow2-ioqe.googlevideo.com/videoplayback?expire=1791830000&id=o-ABC123&itag=248&source=youtube&range=${i * 10000}-${(i + 1) * 10000}&rn=${i}&rbuf=${i * 1000}&ump=1`,
+      statusCode: 200,
+      responseHeaders: [{ name: 'Content-Type', value: 'video/webm' }]
+    });
+  }
+
+  assert.equal(c.capturedMediaByTab[1]?.length || 0, 0, 'Must NOT capture 20 duplicate googlevideo.com/videoplayback MSE chunks');
+});
+
+test('Bug 2 (Image 2) & Stream Deduplication: addUniqueRecentStream deduplicates streams and excludes MSE chunks, and getMediaDetails excludes icons/avatars/SVGs', () => {
+  const contentSource = fs.readFileSync('Extension/content.js', 'utf8');
+  const recentStreams = [];
+  const c = vm.createContext({
+    URL,
+    recentStreams,
+    sniffImagesEnabled: true,
+    window: { location: { hostname: 'www.youtube.com', href: 'https://www.youtube.com/watch?v=stream123' } }
+  });
+
+  const mediaDetailsCode = contentSource.slice(contentSource.indexOf('function isVideoIframe('), contentSource.indexOf('function createFloatingBar('));
+  const streamDedupeCode = contentSource.slice(contentSource.indexOf('function isChunkOrMseStreamUrl('), contentSource.indexOf('function onMediaActive('));
+  vm.runInContext(mediaDetailsCode + '\n' + streamDedupeCode, c);
+
+  // 1. 20 YouTube videoplayback chunks must be rejected from recentStreams
+  for (let i = 1; i <= 20; i++) {
+    c.addUniqueRecentStream({
+      url: `https://rr1---sn-g530uxow2-ioqe.googlevideo.com/videoplayback?id=abc&itag=248&range=${i * 100}-${(i + 1) * 100}&rn=${i}`,
+      filename: 'videoplayback.mp4',
+      mime: 'video/mp4'
+    });
+  }
+  assert.equal(recentStreams.length, 0, 'recentStreams must reject googlevideo.com/videoplayback MSE chunks');
+
+  // 2. Duplicate HLS/MP4 streams with transient query params (_, t, rn) must be deduplicated into 1 entry
+  c.addUniqueRecentStream({ url: 'https://cdn.example.com/live/master.m3u8?token=xyz&_=1001', filename: 'master.m3u8' });
+  c.addUniqueRecentStream({ url: 'https://cdn.example.com/live/master.m3u8?token=xyz&_=1002', filename: 'master.m3u8' });
+  assert.equal(recentStreams.length, 1, 'recentStreams must deduplicate streams differing only by transient params');
+
+  // 3. Avatar / icon / SVG / small images must return null in getMediaDetails
+  const avatarImg = {
+    tagName: 'IMG',
+    className: 'yt-spec-avatar-shape__image',
+    src: 'https://yt3.ggpht.com/avatar.jpg',
+    naturalWidth: 88,
+    naturalHeight: 88,
+    getBoundingClientRect: () => ({ width: 200, height: 200, top: 10, left: 10, right: 210, bottom: 210 }),
+    closest: () => null
+  };
+  assert.equal(c.getMediaDetails(avatarImg), null, 'Avatar image must not trigger download bar');
+
+  const svgIcon = {
+    tagName: 'IMG',
+    className: 'content-img',
+    src: 'https://example.com/icon.svg',
+    naturalWidth: 300,
+    naturalHeight: 300,
+    getBoundingClientRect: () => ({ width: 300, height: 300, top: 100, left: 100, right: 400, bottom: 400 }),
+    closest: () => null
+  };
+  assert.equal(c.getMediaDetails(svgIcon), null, 'SVG icon must not trigger download bar');
+
+  const genuinePhoto = {
+    tagName: 'IMG',
+    className: 'post-photo',
+    src: 'https://example.com/photo.jpg',
+    naturalWidth: 800,
+    naturalHeight: 600,
+    getBoundingClientRect: () => ({ width: 400, height: 300, top: 120, left: 100, right: 500, bottom: 420 }),
+    closest: () => null
+  };
+  const photoDetails = c.getMediaDetails(genuinePhoto);
+  assert(photoDetails && photoDetails.type === 'image', 'Genuine large photo must be detected as downloadable image');
+});
+
+test('Bug 3 (Image 3): findMediaUnderPointer never matches page video when hovering header icons and positionBar places button inside media top-right instead of overlapping header above', () => {
+  const source = fs.readFileSync('Extension/content.js', 'utf8');
+  const videoEl = {
+    tagName: 'VIDEO',
+    currentSrc: 'blob:https://www.youtube.com/1234',
+    getBoundingClientRect: () => ({ width: 854, height: 480, top: 56, left: 24, right: 878, bottom: 536 }),
+    closest: () => null,
+    querySelector: () => null
+  };
+  const bellIcon = {
+    tagName: 'YT-ICON',
+    id: 'notification-bell',
+    className: 'style-scope ytd-notification-topbar-button-renderer',
+    hasAttribute: () => false,
+    getBoundingClientRect: () => ({ width: 24, height: 24, top: 16, left: 1120, right: 1144, bottom: 40 }),
+    closest: (sel) => sel.includes('header') || sel.includes('ytd-masthead') ? masthead : null,
+    querySelector: () => null
+  };
+  const masthead = {
+    tagName: 'YTD-MASTHEAD',
+    id: 'masthead',
+    className: 'style-scope ytd-app',
+    hasAttribute: () => false,
+    getBoundingClientRect: () => ({ width: 1200, height: 56, top: 0, left: 0, right: 1200, bottom: 56 }),
+    closest: () => null,
+    querySelector: () => null
+  };
+  const ytdApp = {
+    tagName: 'YTD-APP',
+    id: '',
+    className: '',
+    hasAttribute: () => false,
+    getBoundingClientRect: () => ({ width: 1200, height: 900, top: 0, left: 0, right: 1200, bottom: 900 }),
+    closest: () => null,
+    querySelector: (sel) => sel === 'video' ? videoEl : null
+  };
+
+  const c = vm.createContext({
+    window: {
+      self: {},
+      top: null,
+      innerHeight: 900,
+      innerWidth: 1200,
+      location: { hostname: 'www.youtube.com', href: 'https://www.youtube.com/watch?v=stream123' }
+    },
+    document: {
+      documentElement: { clientWidth: 1200 },
+      activeElement: null,
+      elementsFromPoint: () => [bellIcon, masthead, ytdApp]
+    },
+    sniffImagesEnabled: true,
+    getComputedStyle: () => ({ backgroundImage: 'none', position: 'static' })
+  });
+  c.window.top = c.window.self;
+
+  const fnCode = source.slice(source.indexOf('function isVideoIframe('), source.indexOf('function createFloatingBar('));
+  const posCode = source.slice(source.indexOf('function positionBar('), source.indexOf('function removeFloatingBar('));
+  vm.runInContext(fnCode + '\n' + posCode, c);
+
+  // Hovering on the notification bell icon at (1130, 28) -> must return null, NEVER ytdApp's video!
+  const hitOnBell = c.findMediaUnderPointer({ clientX: 1130, clientY: 28 });
+  assert.equal(hitOnBell, null, 'Must NOT detect video when cursor is over notification bell icon in header');
+
+  // Positioning bar for video at top=56 (right below 56px header) -> must place inside video (top >= 56), NEVER at y=22 overlapping the header!
+  const bar = {
+    offsetWidth: 140,
+    offsetHeight: 28,
+    style: {},
+    classList: {
+      classes: new Set(),
+      toggle(cls, val) { if (val) this.classes.add(cls); else this.classes.delete(cls); },
+      contains(cls) { return this.classes.has(cls); },
+      add(cls) { this.classes.add(cls); },
+      remove(cls) { this.classes.delete(cls); }
+    },
+    matches: () => false,
+    getBoundingClientRect: () => ({ top: 62, bottom: 90, left: 732, right: 872 })
+  };
+  c.positionBar(bar, videoEl);
+  const topPx = parseInt(bar.style.top, 10);
+  assert(topPx >= 56, `Floating bar top (${topPx}px) must be >= video top (56px) so it never overlaps the header icons above the video`);
+});

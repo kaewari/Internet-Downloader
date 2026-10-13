@@ -267,13 +267,33 @@ const UI_SOUNDS = [
 
 // Lắng nghe luồng dữ liệu media thực tế từ WebRequest
 if (chrome.webRequest && chrome.webRequest.onResponseStarted) {
+  function isMseRangeOrChunkUrl(urlStr) {
+    if (!urlStr) return false;
+    const lower = urlStr.toLowerCase();
+    if (lower.includes("/videoplayback") || lower.includes("googlevideo.com")) return true;
+    if (/[?&](range|bytestart|byteend|sq|ump|rbuf|srfvp)=/i.test(lower)) return true;
+    return false;
+  }
+
+  function normalizeMediaStreamKey(urlStr) {
+    if (!urlStr || typeof urlStr !== "string") return "";
+    try {
+      const u = new URL(urlStr);
+      const transientParams = ["range", "rn", "rbuf", "sq", "bytestart", "byteend", "ump", "srfvp", "_", "t", "ts", "rand"];
+      for (const p of transientParams) u.searchParams.delete(p);
+      return u.origin + u.pathname + (u.searchParams.toString() ? "?" + u.searchParams.toString() : "");
+    } catch (_) {
+      return urlStr.split("#")[0];
+    }
+  }
+
   chrome.webRequest.onResponseStarted.addListener(
     (details) => {
       if (!details) return;
       const url = details.url;
       if (!url || url.startsWith("blob:") || url.startsWith("data:") || url.startsWith("chrome-extension:")) return;
 
-      if (details.responseHeaders) {
+      if (details.responseHeaders && typeof capturedResponseMetaByUrl !== "undefined") {
         let disp = "";
         let ctype = "";
         for (const h of details.responseHeaders) {
@@ -292,9 +312,10 @@ if (chrome.webRequest && chrome.webRequest.onResponseStarted) {
 
       const lowerUrl = url.toLowerCase();
 
-      // Bỏ qua mạng quảng cáo và âm thanh giao diện người dùng
-      if (AD_DOMAINS.some((domain) => lowerUrl.includes(domain))) return;
-      if (UI_SOUNDS.some((sound) => lowerUrl.includes(sound))) return;
+      // Bỏ qua mạng quảng cáo, âm thanh giao diện và các phân đoạn MSE (videoplayback / byte-range)
+      if (typeof AD_DOMAINS !== "undefined" && AD_DOMAINS.some((domain) => lowerUrl.includes(domain))) return;
+      if (typeof UI_SOUNDS !== "undefined" && UI_SOUNDS.some((sound) => lowerUrl.includes(sound))) return;
+      if (isMseRangeOrChunkUrl(url)) return;
 
       const isPlaylistCandidate = lowerUrl.includes(".m3u8") || lowerUrl.includes(".mpd");
 
@@ -322,7 +343,7 @@ if (chrome.webRequest && chrome.webRequest.onResponseStarted) {
 
       if (!isMedia) {
         const mediaExtRegex = /\.(mp4|webm|mkv|mov|m3u8|mpd|m4s|ts|mp3|m4a|aac|flac|wav)(\?|$|#)/i;
-        if (lowerUrl.includes("videoplayback") || mediaExtRegex.test(lowerUrl)) {
+        if (mediaExtRegex.test(lowerUrl)) {
           isMedia = true;
         }
       }
@@ -333,13 +354,14 @@ if (chrome.webRequest && chrome.webRequest.onResponseStarted) {
         }
         let list = capturedMediaByTab[details.tabId];
         const isPlaylist = lowerUrl.includes(".m3u8") || mime.includes("mpegurl") || lowerUrl.includes(".mpd") || mime.includes("dash+xml");
-        const isChunk = lowerUrl.includes(".ts") || lowerUrl.includes(".m4s");
+        const isChunk = lowerUrl.includes(".ts") || lowerUrl.includes(".m4s") || lowerUrl.includes(".m4f") || lowerUrl.includes(".cmfv") || lowerUrl.includes(".cmfa");
 
         // Khi đã có playlist (.m3u8), không lưu các chunk lẻ (.ts/.m4s) để tránh làm loãng danh sách
         if (isChunk && list.some((item) => item.isPlaylist)) return;
-        if (isChunk && list.filter((item) => item.isChunk).length >= 2) return;
+        if (isChunk && list.filter((item) => item.isChunk).length >= 1) return;
 
-        if (!list.some((item) => item.url === url)) {
+        const streamKey = normalizeMediaStreamKey(url);
+        if (!list.some((item) => item.url === url || normalizeMediaStreamKey(item.url) === streamKey)) {
           let filename = url.split("?")[0].split("/").pop() || "media";
           if (!filename.includes(".")) {
             if (mime.includes("mp4") || lowerUrl.includes(".mp4")) filename += ".mp4";
@@ -529,11 +551,11 @@ function isSameBaseDomain(url1, url2) {
 
 // Gửi request tới Native Messaging Host của Internet Downloader
 function sendDownloadToHost(data, callback, tabId) {
-  const bestFilename = resolveBestFilename(data);
+  const bestFilename = (typeof resolveBestFilename === "function") ? resolveBestFilename(data) : "";
   const filename = bestFilename || data.filename || data.url.split("/").pop().split("?")[0] || "Tệp tin";
 
   function proceed(cookies) {
-    const capturedHeaders = capturedHeadersByUrl[data.url] || {};
+    const capturedHeaders = (typeof capturedHeadersByUrl !== "undefined" && capturedHeadersByUrl[data.url]) ? capturedHeadersByUrl[data.url] : {};
     const headers = { ...capturedHeaders };
     if (!headers["Referer"] && data.referrer) {
       headers["Referer"] = data.referrer;

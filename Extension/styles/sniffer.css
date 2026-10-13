@@ -253,6 +253,10 @@
   background: rgba(255, 255, 255, 0.02) !important;
 }
 
+.idm-batch-row.idm-row-hidden {
+  display: none !important;
+}
+
 /* Explicit custom-styled checkbox impervious to website resets */
 .idm-item-check {
   -webkit-appearance: none !important;
