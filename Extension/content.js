@@ -168,18 +168,47 @@
   }
 
   // ==========================================
-  // RC-1 FIX: Nhận diện chi tiết Media (bao gồm picture, background-image, iframe)
+  // RC-1 FIX: Nhận diện chi tiết Media (chỉ nhận diện Video, Audio, Ảnh lớn, GIF; loại trừ Icon/Header/UI)
   // ==========================================
+  function isUiOrIconElement(el) {
+    if (!el) return false;
+    const tag = (el.tagName || "").toUpperCase();
+    if (["SVG", "PATH", "YT-ICON", "ICON-SHAPE", "YT-ICON-BUTTON", "BUTTON"].includes(tag)) return true;
+    const clsAndId = `${el.id || ""} ${typeof el.className === "string" ? el.className : ""}`.toLowerCase();
+    if (/(^|[\s_-])(avatar|icon|logo|emoji|badge|masthead|navbar|topbar|toolbar|header-btn)($|[\s_-])/i.test(clsAndId)) {
+      return true;
+    }
+    if (typeof el.closest === "function") {
+      const uiParent = el.closest("header, nav, ytd-masthead, #masthead-container, [role='banner'], [role='navigation'], button, [role='button'], yt-icon, [class*='avatar'], [class*='logo'], [id*='avatar'], [id*='logo']");
+      if (uiParent && tag !== "VIDEO") return true;
+    }
+    return false;
+  }
+
+  function isPageLayoutContainer(el) {
+    if (!el) return true;
+    const tag = (el.tagName || "").toUpperCase();
+    if (["HTML", "BODY", "MAIN", "HEADER", "FOOTER", "NAV", "ASIDE", "YTD-APP", "YTD-PAGE-MANAGER", "YTD-WATCH-FLEXY", "YTD-BROWSE", "YTD-MASTHEAD"].includes(tag)) {
+      return true;
+    }
+    return false;
+  }
+
+  function pointInsideMediaRect(pt, rect) {
+    if (!pt || !rect || rect.width <= 0 || rect.height <= 0) return false;
+    return pt.x >= rect.left && pt.x <= rect.right && pt.y >= rect.top && pt.y <= rect.bottom;
+  }
+
   function getMediaDetails(el) {
-    if (!el) return null;
+    if (!el || isPageLayoutContainer(el)) return null;
 
     // 1. Thẻ Video
     if (el.tagName === "VIDEO") {
-      if (isVideoPlatform()) {
+      if (typeof isVideoPlatform === "function" && isVideoPlatform()) {
         return { url: window.location.href, type: "video", label: "Tải video này" };
       }
       let src = el.currentSrc || el.src;
-      if (!src) {
+      if (!src && el.querySelector) {
         const source = el.querySelector("source");
         if (source) src = source.src;
       }
@@ -192,15 +221,19 @@
       return { url: src || window.location.href, type: "audio", label: "Tải âm thanh" };
     }
 
-    // 3. Thẻ Image / GIF
+    // 3. Thẻ Image / GIF (loại trừ icon, avatar, svg, nút bấm)
     if (el.tagName === "IMG") {
       if (typeof sniffImagesEnabled !== "undefined" && !sniffImagesEnabled) return null;
+      if (isUiOrIconElement(el)) return null;
       const src = el.currentSrc || el.src;
-      if (!src || src.startsWith("data:")) return null;
+      if (!src || src.startsWith("data:") || /\.svg(\?|$|#)/i.test(src) || src.includes("image/svg")) return null;
 
-      const rect = el.getBoundingClientRect();
-      const isGif = src.toLowerCase().includes(".gif");
-      if (isGif && (rect.width >= 60 || rect.height >= 60)) {
+      const rect = el.getBoundingClientRect ? el.getBoundingClientRect() : { width: 0, height: 0 };
+      const isGif = /\.gif(\?|$|#)/i.test(src);
+      if (el.naturalWidth > 0 && el.naturalHeight > 0 && (el.naturalWidth < 100 || el.naturalHeight < 100) && !isGif) {
+        return null;
+      }
+      if (isGif && rect.width >= 100 && rect.height >= 100) {
         return { url: src, type: "gif", label: "Tải ảnh GIF" };
       }
       if (rect.width >= 150 && rect.height >= 150) {
@@ -211,28 +244,12 @@
 
     // RC-1a: <picture> element → lấy img bên trong
     if (el.tagName === "PICTURE") {
-      const img = el.querySelector("img");
+      const img = el.querySelector ? el.querySelector("img") : null;
       if (img) return getMediaDetails(img);
       return null;
     }
 
-    // RC-1b: CSS background-image (Facebook dùng div style="background-image: url(...)")
-    if (typeof sniffImagesEnabled === "undefined" || sniffImagesEnabled) {
-      try {
-        const bg = getComputedStyle(el).backgroundImage;
-        if (bg && bg !== "none") {
-          const match = bg.match(/url\(["']?([^"')]+)["']?\)/);
-          if (match && match[1] && !match[1].startsWith("data:")) {
-            const rect = el.getBoundingClientRect();
-            if (rect.width >= 150 && rect.height >= 150) {
-              return { url: match[1], type: "image", label: "Tải hình ảnh" };
-            }
-          }
-        }
-      } catch (_) {}
-    }
-
-    // 4. Video Player Container đặc thù (YouTube, TikTok, Facebook, Dailymotion, custom players)
+    // 4. Video Player Container đặc thù (chỉ khớp đúng player thực sự)
     if (el.classList) {
       if (el.classList.contains("html5-video-player") || el.classList.contains("video-stream") || el.id === "movie_player") {
         return { url: window.location.href, type: "video", label: "Tải video này" };
@@ -252,58 +269,69 @@
     return null;
   }
 
-  // RC-2 FIX: Dùng elementsFromPoint thay vì elementFromPoint — xuyên qua overlay div
+  // RC-2 FIX: Dùng elementsFromPoint nhưng kiểm tra nghiêm ngặt tọa độ con trỏ nằm trong khung media thật, loại trừ thanh Header/Icon
   function findMediaUnderPointer(e) {
     if (typeof window !== "undefined" && window.self !== window.top) return null;
-    // elementsFromPoint trả về TẤT CẢ elements xếp chồng theo z-index (từ trên xuống)
     const elements = document.elementsFromPoint(e.clientX, e.clientY);
     if (!elements || elements.length === 0) return null;
+    const pt = { x: e.clientX, y: e.clientY };
+
+    // Nếu phần tử trên cùng dưới con trỏ nằm trong thanh header/navbar/modal/icon giao diện thì dừng ngay
+    const topEl = elements[0];
+    if (topEl && isUiOrIconElement(topEl)) return null;
 
     for (const el of elements) {
-      // Bỏ qua các phần tử IDM của chính mình
+      if (!el) continue;
       if (el.hasAttribute && el.hasAttribute("data-idm-bar")) continue;
       if (el.id && el.id.startsWith("idm-")) continue;
 
-      // Thử nhận diện trực tiếp
-      const media = getMediaDetails(el);
-      if (media) return { element: el, media };
+      // Nếu gặp thanh điều hướng / header cố định thì dừng, không xuyên qua header xuống phần tử bên dưới
+      if (isUiOrIconElement(el)) return null;
+      if (isPageLayoutContainer(el)) continue;
 
-      // Tìm video bên trong container
+      // 1. Thử nhận diện trực tiếp trên phần tử media
+      const media = getMediaDetails(el);
+      if (media) {
+        const rect = el.getBoundingClientRect ? el.getBoundingClientRect() : null;
+        if (!rect || pointInsideMediaRect(pt, rect)) {
+          const innerVideo = (el.tagName !== "VIDEO" && el.querySelector) ? el.querySelector("video") : null;
+          return { element: innerVideo || el, media };
+        }
+      }
+
+      // 2. Chỉ tìm video/img con khi el là lớp phủ (overlay) nhỏ hơn hoặc bằng khung player, và con trỏ phải nằm trong chính khung video/img đó
       if (el.querySelector) {
         const videoInside = el.querySelector("video");
-        if (videoInside) {
-          const m = getMediaDetails(videoInside);
-          if (m) return { element: el, media: m };
+        if (videoInside && videoInside.getBoundingClientRect) {
+          const vRect = videoInside.getBoundingClientRect();
+          if (pointInsideMediaRect(pt, vRect)) {
+            const m = getMediaDetails(videoInside);
+            if (m) return { element: videoInside, media: m };
+          }
         }
 
-        // Tìm img bên trong
         if (sniffImagesEnabled) {
-          const imgInside = el.tagName === "IMG" ? el : el.querySelector("img");
-          if (imgInside) {
-            const m = getMediaDetails(imgInside);
-            if (m) return { element: imgInside, media: m };
-          }
-
-          // Tìm picture bên trong
-          const pictureInside = el.querySelector("picture img");
-          if (pictureInside) {
-            const m = getMediaDetails(pictureInside);
-            if (m) return { element: pictureInside, media: m };
+          const imgInside = el.tagName === "IMG" ? el : el.querySelector("img, picture img");
+          if (imgInside && imgInside.getBoundingClientRect) {
+            const iRect = imgInside.getBoundingClientRect();
+            if (pointInsideMediaRect(pt, iRect)) {
+              const m = getMediaDetails(imgInside);
+              if (m) return { element: imgInside, media: m };
+            }
           }
         }
       }
 
-      // Tìm player wrapper bằng closest
+      // 3. Kiểm tra trình phát bao ngoài trực tiếp (.html5-video-player / #movie_player)
       if (el.closest) {
-        const parentPlayer = el.closest(".html5-video-player, video, [class*='player'], [class*='video-container'], [class*='video-wrapper']");
+        const parentPlayer = el.closest(".html5-video-player, #movie_player, video");
         if (parentPlayer) {
-          const v = parentPlayer.tagName === "VIDEO" ? parentPlayer : parentPlayer.querySelector("video");
-          if (v) {
-            const m = getMediaDetails(v);
-            if (m) return { element: parentPlayer, media: m };
-          }
-          if (window.location.hostname.includes("youtube.com")) {
-            return { element: parentPlayer, media: { url: window.location.href, type: "video", label: "Tải video này" } };
+          const v = parentPlayer.tagName === "VIDEO" ? parentPlayer : (parentPlayer.querySelector ? parentPlayer.querySelector("video") : null);
+          const checkEl = v || parentPlayer;
+          const pRect = checkEl.getBoundingClientRect ? checkEl.getBoundingClientRect() : null;
+          if (pRect && pointInsideMediaRect(pt, pRect)) {
+            const m = getMediaDetails(checkEl);
+            if (m) return { element: checkEl, media: m };
           }
         }
       }
@@ -525,7 +553,7 @@
 
     let refEl = targetEl;
     if (targetEl.tagName === "VIDEO" || targetEl.tagName === "IFRAME") {
-      const playerWrapper = targetEl.closest?.(".html5-video-player, [class*='player'], [class*='video-container'], [id*='player']");
+      const playerWrapper = targetEl.closest?.(".html5-video-player, #movie_player, [class*='video-container']");
       if (playerWrapper && playerWrapper !== targetEl) {
         const wRect = playerWrapper.getBoundingClientRect();
         if (wRect.width > 0 && wRect.height > 0 && wRect.height < window.innerHeight * 1.5) {
@@ -551,10 +579,10 @@
     if (left < 0) left = Math.max(gap, rect.left);
     if (left + barWidth > viewportWidth) left = Math.max(0, viewportWidth - barWidth - gap);
 
-    // Ưu tiên hiển thị phía trên player (như IDM)
+    // Ưu tiên hiển thị phía trên player nếu có đủ khoảng trống bên dưới vùng thanh header cố định (top >= 60)
     let top = rect.top - barHeight - gap;
-    // Nếu sát đỉnh trang (rect.top nhỏ) hoặc bên trong iframe đầy màn hình, lật vào mép trên bên trong player
-    if (top < 0) {
+    // Nếu sát đỉnh trang hoặc nằm ngay dưới vùng thanh header/navbar cố định (top < 60), lật vào mép trên bên trong player để không đè lên icon header
+    if (top < 60) {
       top = Math.max(0, rect.top + gap);
     }
 
@@ -587,8 +615,7 @@
       (barRect && pointInsideRect(pointer, barRect)) ||
       (mediaRect && pointInsideRect(pointer, mediaRect));
 
-    const isProactive = Number(bar.dataset?.proactiveUntil || 0) > Date.now();
-    const isVisible = !!(bar.classList.contains("idm-positionable") && (pointerOver || keyboardFocused || isProactive));
+    const isVisible = !!(bar.classList.contains("idm-positionable") && (pointerOver || keyboardFocused));
 
     bar.classList.toggle("idm-visible", isVisible);
   }
@@ -608,10 +635,6 @@
     hideTimeout = setTimeout(() => {
       hideTimeout = null;
       if (currentBar) {
-        if (Number(currentBar.dataset?.proactiveUntil || 0) > Date.now()) {
-          updateBarVisibility(currentBar);
-          return;
-        }
         positionBar(currentBar, currentTargetEl);
         if (currentBar.classList.contains("idm-visible")) return;
       }
@@ -620,33 +643,61 @@
   }
 
   // ==========================================
-  // Proactive Multi-layer Media Detection
+  // Multi-layer Media Detection & Stream Deduplication
   // ==========================================
-  function onMediaActive(el, isProactiveTrigger = false) {
-    if (!el || !showFloatingBarEnabled) return;
-    if (typeof window !== "undefined" && window.self !== window.top) return;
-    const details = getMediaDetails(el);
-    if (details) {
-      createFloatingBar(el, details);
-      if (currentBar && isProactiveTrigger) {
-        currentBar.dataset.proactiveUntil = String(Date.now() + 8000);
-        updateBarVisibility(currentBar);
-      }
+  function isChunkOrMseStreamUrl(urlStr) {
+    if (!urlStr || typeof urlStr !== "string") return false;
+    const lower = urlStr.toLowerCase();
+    if (lower.includes("/videoplayback") || lower.includes("googlevideo.com")) return true;
+    if (/\.(ts|m4s|m4f|cmfv|cmfa|fmp4)(\?|$|#)/i.test(lower)) return true;
+    if (/[?&](range|bytestart|byteend|sq|ump|rbuf|srfvp)=/i.test(lower)) return true;
+    return false;
+  }
+
+  function normalizeStreamUrlKey(urlStr) {
+    if (!urlStr || typeof urlStr !== "string") return "";
+    try {
+      const u = new URL(urlStr, window.location.href);
+      const transientParams = ["range", "rn", "rbuf", "sq", "bytestart", "byteend", "ump", "srfvp", "_", "t", "ts", "rand"];
+      for (const p of transientParams) u.searchParams.delete(p);
+      return u.origin + u.pathname + (u.searchParams.toString() ? "?" + u.searchParams.toString() : "");
+    } catch (_) {
+      return urlStr.split("#")[0];
     }
   }
 
-  // 1. Event Listeners ở Capture Phase (Bắt tức thì ngay khi video nạp / phát < 10ms)
-  // RC-7 FIX: dùng composedPath() để traverse qua Shadow DOM boundary
+  function addUniqueRecentStream(item) {
+    if (!item || !item.url || isChunkOrMseStreamUrl(item.url)) return;
+    const key = normalizeStreamUrlKey(item.url);
+    if (recentStreams.some(s => s.url === item.url || normalizeStreamUrlKey(s.url) === key)) return;
+    recentStreams.unshift(item);
+    if (recentStreams.length > 20) recentStreams.pop();
+  }
+
+  function onMediaActive(el) {
+    if (!el || !showFloatingBarEnabled) return;
+    if (typeof window !== "undefined" && window.self !== window.top) return;
+    // Chỉ hiển thị nút tải nổi khi con trỏ chuột thực sự đang nằm trên phần tử media đó
+    if (!lastPointer || !el.getBoundingClientRect) return;
+    const rect = el.getBoundingClientRect();
+    if (!pointInsideRect(lastPointer, rect)) return;
+    const details = getMediaDetails(el);
+    if (details) {
+      createFloatingBar(el, details);
+      if (currentBar) updateBarVisibility(currentBar, rect);
+    }
+  }
+
   function handleMediaEvent(e) {
     if (typeof window !== "undefined" && window.self !== window.top) return;
     const path = e.composedPath ? e.composedPath() : [e.target];
     for (const el of path) {
       if (el && el.tagName && (el.tagName === "VIDEO" || el.tagName === "AUDIO")) {
-        onMediaActive(el, true);
+        onMediaActive(el);
         return;
       }
     }
-    onMediaActive(e.target, true);
+    onMediaActive(e.target);
   }
 
   document.addEventListener("play", handleMediaEvent, true);
@@ -654,45 +705,15 @@
   document.addEventListener("loadeddata", handleMediaEvent, true);
   document.addEventListener("canplay", handleMediaEvent, true);
 
-  // 2. RC-3 FIX: scanMediaInNode không return sớm, duyệt hết tất cả elements
   function scanMediaInNode(root) {
     if (typeof window !== "undefined" && window.self !== window.top) return;
     if (!root || !root.querySelectorAll) return;
 
-    // Quét candidate iframe players
     const iframes = root.querySelectorAll("iframe");
     for (const f of iframes) {
       observeIframeHover(f);
-      if (isVideoIframe(f) && recentStreams.length > 0 && !currentBar) {
-        onMediaActive(f, true);
-      }
     }
 
-    // Quét video & audio — không return sớm, duyệt hết
-    const mediaEls = root.querySelectorAll("video, audio");
-    for (const m of mediaEls) {
-      if (!m.paused || m.readyState >= 2) {
-        onMediaActive(m, true);
-        // Không return — tiếp tục duyệt các element khác
-      }
-    }
-
-    // Quét ảnh lớn
-    if (sniffImagesEnabled) {
-      const imgs = root.querySelectorAll("img");
-      for (const img of imgs) {
-        const details = getMediaDetails(img);
-        if (details) {
-          // Chỉ trigger nếu hình đang visible trong viewport
-          const rect = img.getBoundingClientRect();
-          if (rect.top < window.innerHeight && rect.bottom > 0) {
-            // Không auto-show bar cho ảnh khi scan — dùng hover
-          }
-        }
-      }
-    }
-
-    // RC-7 FIX: Quét Shadow DOM — chỉ recurse nodes mới, không querySelectorAll("*")
     const all = root.querySelectorAll("*");
     for (const el of all) {
       if (el.shadowRoot) {
@@ -701,49 +722,24 @@
     }
   }
 
-  // Quét ngay khi trang nạp
   if (document.readyState === "loading") {
     document.addEventListener("DOMContentLoaded", () => scanMediaInNode(document.body));
   } else {
     scanMediaInNode(document.body);
   }
 
-  // RC-4 FIX: MutationObserver không dùng return — xử lý mọi node trong batch
   const domObserver = new MutationObserver((mutations) => {
     if (typeof window !== "undefined" && window.self !== window.top) return;
     for (const mut of mutations) {
       for (const node of mut.addedNodes) {
-        if (node.nodeType !== 1) continue; // Không phải Element node
-
-        if (node.tagName === "VIDEO" || node.tagName === "AUDIO") {
-          onMediaActive(node, true);
-          // Không return — tiếp tục xử lý các node khác trong batch
-          continue;
-        }
-
+        if (node.nodeType !== 1) continue;
         if (node.tagName === "IFRAME") {
           observeIframeHover(node);
-          if (isVideoIframe(node) && recentStreams.length > 0 && !currentBar) {
-            onMediaActive(node, true);
-          }
         }
-
         if (node.querySelector) {
-          const v = node.querySelector("video, audio");
-          if (v) {
-            onMediaActive(v, true);
-            // Không return
-          }
           const f = node.querySelector("iframe");
-          if (f) {
-            observeIframeHover(f);
-            if (isVideoIframe(f) && recentStreams.length > 0 && !currentBar) {
-              onMediaActive(f, true);
-            }
-          }
+          if (f) observeIframeHover(f);
         }
-
-        // RC-7: Check shadowRoot inline trên node mới
         if (node.shadowRoot) {
           scanMediaInNode(node.shadowRoot);
         }
@@ -755,7 +751,7 @@
     domObserver.observe(document.body, { childList: true, subtree: true });
   }
 
-  // 3. Lắng nghe Mousemove (hỗ trợ hover ảnh, GIF, player overlay)
+  // 3. Lắng nghe Mousemove (hỗ trợ hover video, ảnh lớn, GIF)
   let lastMoveTime = 0;
   document.addEventListener("mousemove", (e) => {
     const now = Date.now();
@@ -773,23 +769,6 @@
         positionBar(currentBar, currentTargetEl);
       }
       return;
-    }
-
-    // Nếu con trỏ đang ở trong khoảng không gian giữa thanh nút tải và media, giữ nguyên
-    if (currentBar?.classList.contains("idm-visible") && currentTargetEl) {
-      const barRect = currentBar.getBoundingClientRect();
-      const mediaRect = currentTargetEl.getBoundingClientRect();
-      const minX = Math.min(barRect.left, mediaRect.left) - 10;
-      const maxX = Math.max(barRect.right, mediaRect.right) + 10;
-      const minY = Math.min(barRect.top, mediaRect.top) - 10;
-      const maxY = Math.max(barRect.bottom, mediaRect.bottom) + 10;
-      if (e.clientX >= minX && e.clientX <= maxX && e.clientY >= minY && e.clientY <= maxY) {
-        if (hideTimeout) {
-          clearTimeout(hideTimeout);
-          hideTimeout = null;
-        }
-        return;
-      }
     }
 
     const detected = findMediaUnderPointer(e);
@@ -815,7 +794,7 @@
     const target = event.target;
     if (!(target instanceof Element)) return;
     const focusedMedia = target.matches("video, audio, img") ? target :
-      target.closest(".html5-video-player, [class*='player'], [class*='video-container'], [class*='video-wrapper'], a")?.querySelector("video, audio, img");
+      target.closest(".html5-video-player, #movie_player, [class*='video-container'], a")?.querySelector("video, audio, img");
     const details = focusedMedia && getMediaDetails(focusedMedia);
     if (details) {
       createFloatingBar(focusedMedia, details);
@@ -929,21 +908,13 @@
       showDownloadToast(req.filename, req.url);
     } else if (req.action === "media_stream_detected") {
       if (req.mediaItem) {
-        recentStreams.unshift(req.mediaItem);
-        if (recentStreams.length > 20) recentStreams.pop();
-
-        if (!currentBar) {
-          const activeMedia = findCandidateMedia(document);
-          if (activeMedia) {
-            onMediaActive(activeMedia, true);
-          }
-        }
+        addUniqueRecentStream(req.mediaItem);
       }
     } else if (req.action === "spa_navigated") {
-      // RC-5: SPA navigation — reset state và re-scan
+      // RC-5: SPA navigation — xóa danh sách stream cũ, đóng thanh nổi và quét lại
+      recentStreams.length = 0;
       removeFloatingBar();
       window.__idmContentLoaded = false;
-      // Re-scan sau một khoảnh khắc để DOM update
       setTimeout(() => scanMediaInNode(document.body), 800);
     }
   });
@@ -953,14 +924,7 @@
     if (chrome.runtime.lastError) return;
     if (resp && resp.media && resp.media.length > 0) {
       for (const item of resp.media) {
-        recentStreams.unshift(item);
-      }
-      // Nếu có stream nhưng chưa có bar, thử attach vào video/iframe player hiện tại
-      if (!currentBar) {
-        const activeMedia = findCandidateMedia(document);
-        if (activeMedia) {
-          onMediaActive(activeMedia, true);
-        }
+        addUniqueRecentStream(item);
       }
     }
   });
@@ -973,7 +937,16 @@
     if (existing) existing.remove();
 
     const items = [];
-    const seenUrls = new Set();
+    const seenKeys = new Set();
+
+    function addMediaItem(item) {
+      if (!item || !item.url || item.url.startsWith("data:") || item.url.startsWith("blob:")) return;
+      if (isChunkOrMseStreamUrl(item.url)) return;
+      const key = normalizeStreamUrlKey(item.url);
+      if (!key || seenKeys.has(key)) return;
+      seenKeys.add(key);
+      items.push(item);
+    }
 
     function escapeHtml(str) {
       if (!str) return "";
@@ -993,99 +966,92 @@
       }
     }
 
-    // 1. Quét tất cả thẻ video & audio
-    document.querySelectorAll("video, audio").forEach((v) => {
-      const src = v.currentSrc || v.src;
-      if (src && !seenUrls.has(src) && !src.startsWith("blob:") && !src.startsWith("data:")) {
-        seenUrls.add(src);
-        const isVideo = v.tagName.toLowerCase() === "video";
-        const poster = (isVideo && v.poster) ? v.poster : "";
-        items.push({
-          url: src,
-          name: src.split("/").pop().split("?")[0] || (isVideo ? "video.mp4" : "audio.mp3"),
-          type: isVideo ? "video" : "audio",
-          poster: poster
-        });
-      }
-    });
-
-    // 2. Bổ sung các stream từ WebRequest bắt được
     let ytPoster = "";
     if (window.location.hostname.includes("youtube.com")) {
       const vId = new URLSearchParams(window.location.search).get("v");
       if (vId) ytPoster = `https://i.ytimg.com/vi/${vId}/hqdefault.jpg`;
     }
     const pageVideoPoster = document.querySelector("video[poster]")?.poster || ytPoster;
+    const cleanPageTitle = (document.title || "video")
+      .replace(/^\(\d+\+?\)\s*/, "")
+      .replace(/\s*-\s*YouTube$/i, "")
+      .replace(/[/\\?%*:|"<>]/g, "-")
+      .trim() || "video";
 
-    for (const stream of recentStreams) {
-      if (stream.url && !seenUrls.has(stream.url)) {
-        seenUrls.add(stream.url);
-        const isAudio = (stream.mime && stream.mime.includes("audio")) || stream.url.includes(".mp3") || stream.url.includes(".m4a");
-        items.push({
-          url: stream.url,
-          name: stream.filename || (isAudio ? "audio.mp3" : "video.mp4"),
-          type: isAudio ? "audio" : "video",
-          poster: isAudio ? "" : pageVideoPoster
-        });
-      }
+    // 1. Nếu là nền tảng video (YouTube, TikTok, Facebook,...) và có thẻ video trên trang:
+    // Tạo 1 mục duy nhất đại diện cho video/stream chính của trang (tránh nhân bản 20 chunk videoplayback.mp4)
+    const pageVideos = Array.from(document.querySelectorAll("video, audio"));
+    if (isVideoPlatform() && pageVideos.some(v => v.tagName.toLowerCase() === "video")) {
+      addMediaItem({
+        url: window.location.href,
+        name: `${cleanPageTitle}.mp4`,
+        type: "video",
+        poster: pageVideoPoster
+      });
     }
 
-    // 3. Quét tất cả ảnh lớn & GIF (bao gồm picture, background-image)
-    document.querySelectorAll("img").forEach((img) => {
-      const src = img.currentSrc || img.src;
-      if (src && !seenUrls.has(src) && !src.startsWith("data:")) {
-        const rect = img.getBoundingClientRect();
-        if (rect.width >= 80 || rect.height >= 80 || src.toLowerCase().includes(".gif")) {
-          seenUrls.add(src);
-          const cleanName = src.split("/").pop().split("?")[0] || "image.jpg";
-          items.push({
-            url: src,
-            name: cleanName,
-            type: src.toLowerCase().includes(".gif") ? "gif" : "image",
-            poster: src
-          });
-        }
+    // 1b. Quét tất cả thẻ video & audio có URL trực tiếp
+    pageVideos.forEach((v) => {
+      const src = v.currentSrc || v.src;
+      if (src && !src.startsWith("blob:") && !src.startsWith("data:")) {
+        const isVideo = v.tagName.toLowerCase() === "video";
+        const poster = (isVideo && v.poster) ? v.poster : pageVideoPoster;
+        addMediaItem({
+          url: src,
+          name: src.split("/").pop().split("?")[0] || (isVideo ? `${cleanPageTitle}.mp4` : "audio.mp3"),
+          type: isVideo ? "video" : "audio",
+          poster: poster
+        });
       }
     });
 
-    // 3b. Background-image CSS
-    if (sniffImagesEnabled) {
-      document.querySelectorAll("div, section, article, figure, span").forEach((el) => {
-        try {
-          const bg = getComputedStyle(el).backgroundImage;
-          if (bg && bg !== "none") {
-            const match = bg.match(/url\(["']?([^"')]+)["']?\)/);
-            if (match && match[1] && !match[1].startsWith("data:") && !seenUrls.has(match[1])) {
-              const rect = el.getBoundingClientRect();
-              if (rect.width >= 120 && rect.height >= 120) {
-                seenUrls.add(match[1]);
-                const cleanName = match[1].split("/").pop().split("?")[0] || "image.jpg";
-                items.push({
-                  url: match[1],
-                  name: cleanName,
-                  type: "image",
-                  poster: match[1]
-                });
-              }
-            }
-          }
-        } catch (_) {}
-      });
+    // 2. Bổ sung các stream thực từ WebRequest (chỉ khi không phải nền tảng video dùng yt-dlp page URL, và đã lọc bỏ MSE chunks)
+    if (!isVideoPlatform()) {
+      for (const stream of recentStreams) {
+        if (stream && stream.url && !stream.isChunk && !isChunkOrMseStreamUrl(stream.url)) {
+          const isAudio = (stream.mime && stream.mime.includes("audio")) || /\.(mp3|m4a|aac|flac|wav)(\?|$|#)/i.test(stream.url);
+          addMediaItem({
+            url: stream.url,
+            name: stream.filename || (isAudio ? "audio.mp3" : `${cleanPageTitle}.mp4`),
+            type: isAudio ? "audio" : "video",
+            poster: isAudio ? "" : pageVideoPoster,
+            referrer: stream.referrer
+          });
+        }
+      }
     }
+
+    // 3. Quét tất cả ảnh lớn & GIF (loại trừ icon, avatar, logo, svg, header/nav)
+    document.querySelectorAll("img").forEach((img) => {
+      if (isUiOrIconElement(img)) return;
+      const src = img.currentSrc || img.src;
+      if (!src || src.startsWith("data:") || /\.svg(\?|$|#)/i.test(src) || src.includes("image/svg")) return;
+      const rect = img.getBoundingClientRect ? img.getBoundingClientRect() : { width: 0, height: 0 };
+      const isGif = /\.gif(\?|$|#)/i.test(src);
+      if (img.naturalWidth > 0 && img.naturalHeight > 0 && (img.naturalWidth < 100 || img.naturalHeight < 100) && !isGif) return;
+      if ((isGif && rect.width >= 80 && rect.height >= 80) || (rect.width >= 120 && rect.height >= 120)) {
+        const cleanName = src.split("/").pop().split("?")[0] || (isGif ? "image.gif" : "image.jpg");
+        addMediaItem({
+          url: src,
+          name: cleanName,
+          type: isGif ? "gif" : "image",
+          poster: src
+        });
+      }
+    });
 
     // 4. Quét tất cả liên kết file download
     document.querySelectorAll("a[href]").forEach((a) => {
       const href = a.href;
-      if (href && !seenUrls.has(href)) {
+      if (href) {
         const ext = href.split("?")[0].split(".").pop().toLowerCase();
         if (["zip", "rar", "7z", "dmg", "pkg", "iso", "pdf", "mp4", "mkv", "mp3", "tar", "gz", "exe"].includes(ext)) {
-          seenUrls.add(href);
           let itemType = "file";
           if (["mp4", "mkv"].includes(ext)) itemType = "video";
           else if (["mp3"].includes(ext)) itemType = "audio";
-          items.push({
+          addMediaItem({
             url: href,
-            name: a.innerText.trim() || href.split("/").pop().split("?")[0] || "file",
+            name: (a.innerText || "").trim() || href.split("/").pop().split("?")[0] || "file",
             type: itemType,
             poster: ""
           });
@@ -1157,19 +1123,19 @@
       <div class="idm-batch-dialog">
         <div class="idm-batch-header">
           <div class="idm-batch-title">⬇ IDM Batch Media Grabber (${items.length} mục)</div>
-          <button class="idm-batch-close" id="idmBatchClose">✕</button>
+          <button type="button" class="idm-batch-close" id="idmBatchClose">✕</button>
         </div>
         ${items.length === 0 ? '<div class="idm-empty">Không tìm thấy media hoặc liên kết file nào trên trang này.</div>' : `
           <div class="idm-batch-toolbar">
             <div class="idm-tab-bar" id="idmTabBar">
-              <button class="idm-tab-btn active" data-filter="all">Tất cả <span class="idm-tab-count">${items.length}</span></button>
-              <button class="idm-tab-btn" data-filter="video">Video <span class="idm-tab-count">${videoCount}</span></button>
-              <button class="idm-tab-btn" data-filter="image">Hình ảnh <span class="idm-tab-count">${imageCount}</span></button>
-              ${fileCount > 0 ? `<button class="idm-tab-btn" data-filter="file">Tệp tin <span class="idm-tab-count">${fileCount}</span></button>` : ''}
+              <button type="button" class="idm-tab-btn active" data-filter="all">Tất cả <span class="idm-tab-count">${items.length}</span></button>
+              <button type="button" class="idm-tab-btn" data-filter="video">Video <span class="idm-tab-count">${videoCount}</span></button>
+              <button type="button" class="idm-tab-btn" data-filter="image">Hình ảnh <span class="idm-tab-count">${imageCount}</span></button>
+              ${fileCount > 0 ? `<button type="button" class="idm-tab-btn" data-filter="file">Tệp tin <span class="idm-tab-count">${fileCount}</span></button>` : ''}
             </div>
             <div class="idm-batch-actions-bar">
-              <button id="idmSelectAll" class="idm-btn-secondary">Chọn tất cả</button>
-              <button id="idmDeselectAll" class="idm-btn-secondary">Bỏ chọn</button>
+              <button type="button" id="idmSelectAll" class="idm-btn-secondary">Chọn tất cả</button>
+              <button type="button" id="idmDeselectAll" class="idm-btn-secondary">Bỏ chọn</button>
             </div>
           </div>
           <div class="idm-batch-body">
@@ -1199,8 +1165,8 @@
             ${items.length > 0 ? `Đã chọn: <b id="idmSelectedNum" style="color:#0a84ff;">${items.length}</b> / <span id="idmTotalVisible">${items.length}</span> mục` : ''}
           </div>
           <div class="idm-batch-footer-right">
-            <button class="idm-btn-secondary" id="idmCancel">Đóng</button>
-            ${items.length > 0 ? `<button class="idm-btn-primary" id="idmDownloadBatch">Tải ${items.length} mục đã chọn</button>` : ''}
+            <button type="button" class="idm-btn-secondary" id="idmCancel">Đóng</button>
+            ${items.length > 0 ? `<button type="button" class="idm-btn-primary" id="idmDownloadBatch">Tải ${items.length} mục đã chọn</button>` : ''}
           </div>
         </div>
       </div>
@@ -1217,17 +1183,26 @@
     const downloadBtn = document.getElementById("idmDownloadBatch");
     const selectedNumEl = document.getElementById("idmSelectedNum");
     const totalVisibleEl = document.getElementById("idmTotalVisible");
-    const rows = modal.querySelectorAll(".idm-batch-row");
+    const rows = Array.from(modal.querySelectorAll(".idm-batch-row"));
 
     function getVisibleRows() {
-      if (currentFilter === "all") return Array.from(rows);
-      return Array.from(rows).filter(r => r.getAttribute("data-category") === currentFilter);
+      return rows.filter(r => {
+        if (r.classList.contains("idm-row-hidden")) return false;
+        return currentFilter === "all" || r.getAttribute("data-category") === currentFilter;
+      });
+    }
+
+    function getSelectedVisibleRows() {
+      return getVisibleRows().filter(r => {
+        const chk = r.querySelector(".idm-item-check");
+        return !!(chk && chk.checked);
+      });
     }
 
     function updateSelectionUI() {
-      const allChecked = modal.querySelectorAll(".idm-item-check:checked");
-      const selectedCount = allChecked.length;
       const visibleRows = getVisibleRows();
+      const selectedRows = getSelectedVisibleRows();
+      const selectedCount = selectedRows.length;
 
       if (selectedNumEl) selectedNumEl.textContent = String(selectedCount);
       if (totalVisibleEl) totalVisibleEl.textContent = String(visibleRows.length);
@@ -1254,17 +1229,23 @@
       });
     });
 
-    // Tab Filtering
+    // Tab Filtering: dùng cả class .idm-row-hidden (display: none !important) và style.setProperty
     modal.querySelectorAll(".idm-tab-btn").forEach((btn) => {
-      btn.addEventListener("click", () => {
+      btn.addEventListener("click", (e) => {
+        e.stopPropagation();
         modal.querySelectorAll(".idm-tab-btn").forEach(b => b.classList.remove("active"));
         btn.classList.add("active");
-        currentFilter = btn.getAttribute("data-filter");
+        currentFilter = btn.getAttribute("data-filter") || "all";
 
         rows.forEach(r => {
           const cat = r.getAttribute("data-category");
           const show = currentFilter === "all" || cat === currentFilter;
-          r.style.display = show ? "flex" : "none";
+          r.classList.toggle("idm-row-hidden", !show);
+          if (r.style && typeof r.style.setProperty === "function") {
+            r.style.setProperty("display", show ? "flex" : "none", "important");
+          } else if (r.style) {
+            r.style.display = show ? "flex" : "none";
+          }
         });
 
         updateSelectionUI();
@@ -1272,7 +1253,8 @@
     });
 
     // Chọn tất cả (theo tab hiện tại)
-    document.getElementById("idmSelectAll")?.addEventListener("click", () => {
+    document.getElementById("idmSelectAll")?.addEventListener("click", (e) => {
+      e.stopPropagation();
       const visible = getVisibleRows();
       visible.forEach(r => {
         const chk = r.querySelector(".idm-item-check");
@@ -1283,7 +1265,8 @@
     });
 
     // Bỏ chọn (theo tab hiện tại)
-    document.getElementById("idmDeselectAll")?.addEventListener("click", () => {
+    document.getElementById("idmDeselectAll")?.addEventListener("click", (e) => {
+      e.stopPropagation();
       const visible = getVisibleRows();
       visible.forEach(r => {
         const chk = r.querySelector(".idm-item-check");
@@ -1293,11 +1276,12 @@
       updateSelectionUI();
     });
 
-    // Thực hiện tải
-    downloadBtn?.addEventListener("click", () => {
+    // Thực hiện tải (chỉ tải các mục đang được chọn trong tab lọc hiện tại)
+    downloadBtn?.addEventListener("click", (e) => {
+      e.stopPropagation();
       const selected = [];
-      modal.querySelectorAll(".idm-item-check:checked").forEach(c => {
-        const idx = parseInt(c.getAttribute("data-idx"));
+      getSelectedVisibleRows().forEach(r => {
+        const idx = parseInt(r.getAttribute("data-idx"), 10);
         if (items[idx]) selected.push(items[idx]);
       });
       if (selected.length > 0) {
