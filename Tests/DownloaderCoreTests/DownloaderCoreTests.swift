@@ -1140,7 +1140,82 @@ final class DownloaderCoreTests: XCTestCase {
         XCTAssertEqual(allTasks.first?.cookies, "session=xyz")
         XCTAssertEqual(confirmedBox.get().last?.filename, "ArtCraft_0.41.0_universal.dmg")
     }
+
+    func testIsBarePlatformHomeURL() {
+        // Facebook
+        XCTAssertTrue(URLNormalizer.isBarePlatformHomeURL(URL(string: "https://www.facebook.com/")!))
+        XCTAssertTrue(URLNormalizer.isBarePlatformHomeURL(URL(string: "https://www.facebook.com/?_fb_noscript=1")!))
+        XCTAssertTrue(URLNormalizer.isBarePlatformHomeURL(URL(string: "https://m.facebook.com/home")!))
+        XCTAssertFalse(URLNormalizer.isBarePlatformHomeURL(URL(string: "https://www.facebook.com/watch/?v=987654321")!))
+        XCTAssertFalse(URLNormalizer.isBarePlatformHomeURL(URL(string: "https://www.facebook.com/reel/123456789")!))
+        XCTAssertFalse(URLNormalizer.isBarePlatformHomeURL(URL(string: "https://www.facebook.com/user/videos/123456789")!))
+
+        // YouTube
+        XCTAssertTrue(URLNormalizer.isBarePlatformHomeURL(URL(string: "https://www.youtube.com/")!))
+        XCTAssertTrue(URLNormalizer.isBarePlatformHomeURL(URL(string: "https://www.youtube.com/feed")!))
+        XCTAssertFalse(URLNormalizer.isBarePlatformHomeURL(URL(string: "https://www.youtube.com/watch?v=dQw4w9WgXcQ")!))
+        XCTAssertFalse(URLNormalizer.isBarePlatformHomeURL(URL(string: "https://www.youtube.com/shorts/abcdefghijk")!))
+
+        // TikTok
+        XCTAssertTrue(URLNormalizer.isBarePlatformHomeURL(URL(string: "https://www.tiktok.com/")!))
+        XCTAssertTrue(URLNormalizer.isBarePlatformHomeURL(URL(string: "https://www.tiktok.com/foryou")!))
+        XCTAssertFalse(URLNormalizer.isBarePlatformHomeURL(URL(string: "https://www.tiktok.com/@user/video/1234567890")!))
+
+        // Twitter / X
+        XCTAssertTrue(URLNormalizer.isBarePlatformHomeURL(URL(string: "https://x.com/home")!))
+        XCTAssertTrue(URLNormalizer.isBarePlatformHomeURL(URL(string: "https://twitter.com/")!))
+        XCTAssertFalse(URLNormalizer.isBarePlatformHomeURL(URL(string: "https://x.com/user/status/1234567890")!))
+
+        // Non-platform direct files
+        XCTAssertFalse(URLNormalizer.isBarePlatformHomeURL(URL(string: "https://example.com/file.zip")!))
+        XCTAssertFalse(URLNormalizer.isBarePlatformHomeURL(URL(string: "https://video.xx.fbcdn.net/v/t39.2548-2/video.mp4")!))
+    }
+
+    func testMediaURLResolverWithBarePlatformHomeURL() async {
+        let fbHome = URL(string: "https://www.facebook.com/")!
+        let resolved = await MediaURLResolver.resolve(url: fbHome)
+        XCTAssertEqual(resolved.extractor, "unsupported_bare_home")
+        XCTAssertEqual(resolved.directURL, fbHome)
+
+        let probe = await MediaURLResolver.probeMediaSizeAndTitle(url: fbHome)
+        XCTAssertEqual(probe.size, -1)
+    }
+
+    func testDownloadManagerFailsFastOnBarePlatformHomeURL() async throws {
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let dbPath = tempDir.appendingPathComponent("test.db").path
+        let manager = DownloadManager(dbPath: dbPath)
+
+        let task = try manager.createNewTask(
+            url: URL(string: "https://www.facebook.com/")!,
+            filename: "Facebook.mp4",
+            destinationFolder: tempDir
+        )
+
+        let expectation = expectation(description: "Task finishes with friendly failure")
+        manager.onTasksChanged = {
+            if let current = manager.getTask(id: task.id), current.status == TaskStatus.failed {
+                expectation.fulfill()
+            }
+        }
+
+        manager.startDownload(taskId: task.id)
+        await fulfillment(of: [expectation], timeout: 5.0)
+
+        guard let failed = manager.getTask(id: task.id) else {
+            XCTFail("Task not found")
+            return
+        }
+        XCTAssertEqual(failed.status, TaskStatus.failed)
+        XCTAssertNotNil(failed.errorMessage)
+        XCTAssertTrue(failed.errorMessage?.contains("trang chủ hoặc bảng tin") == true, "Must have friendly localized error message instead of raw yt-dlp error, got: \(failed.errorMessage ?? "")")
+        XCTAssertFalse(failed.errorMessage?.contains("ERROR: Unsupported URL") == true, "Must NOT contain raw yt-dlp crash message")
+    }
 }
+
 
 private final class Sub32KBHangProtocol: URLProtocol {
     override class func canInit(with request: URLRequest) -> Bool { true }

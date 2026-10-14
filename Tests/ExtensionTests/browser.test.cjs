@@ -1142,3 +1142,169 @@ test('Bug 3 (Image 3): findMediaUnderPointer never matches page video when hover
   const topPx = parseInt(bar.style.top, 10);
   assert(topPx >= 56, `Floating bar top (${topPx}px) must be >= video top (56px) so it never overlaps the header icons above the video`);
 });
+
+test('Bugfix Facebook/YouTube feed: isVideoWatchPage distinguishes watch pages from feeds, and permalink/CDN/stream is prioritized over bare feed URL', () => {
+  const source = fs.readFileSync('Extension/content.js', 'utf8');
+
+  // Test isVideoWatchPage
+  assert(typeof isVideoWatchPage === 'function' || source.includes('function isVideoWatchPage'), 'isVideoWatchPage must exist in content.js');
+
+  // Setup DOM environment for testing feed resolution
+  const postArticle = {
+    tagName: 'DIV',
+    getAttribute: (attr) => attr === 'role' ? 'article' : null,
+    querySelector: (sel) => {
+      if (sel.includes('/watch') || sel.includes('/reel/')) {
+        return { href: 'https://www.facebook.com/watch/?v=987654321&__cft__[0]=AZ' };
+      }
+      return null;
+    }
+  };
+
+  const fbFeedVideo = {
+    tagName: 'VIDEO',
+    currentSrc: 'blob:https://www.facebook.com/feed-blob-123',
+    closest: (sel) => sel.includes('article') ? postArticle : null,
+    querySelector: () => null,
+    getBoundingClientRect: () => ({ width: 640, height: 360, top: 100, left: 100, right: 740, bottom: 460 })
+  };
+
+  const sentMessages = [];
+  const barListeners = {};
+  const mockBar = {
+    type: 'button',
+    setAttribute: () => {},
+    innerHTML: '',
+    isConnected: true,
+    dataset: {},
+    querySelector: () => ({ textContent: '' }),
+    addEventListener: (evt, handler) => {
+      barListeners[evt] = handler;
+    },
+    classList: { add: () => {}, remove: () => {} },
+    style: {}
+  };
+
+  const c = vm.createContext({
+    URL: URL,
+    window: {
+      self: {},
+      top: null,
+      location: { hostname: 'www.facebook.com', href: 'https://www.facebook.com/', origin: 'https://www.facebook.com', pathname: '/', search: '' },
+      URL: URL,
+      setTimeout: (fn) => setTimeout(fn, 0),
+      clearTimeout: () => {},
+      addEventListener: () => {},
+      removeEventListener: () => {}
+    },
+    location: { hostname: 'www.facebook.com', href: 'https://www.facebook.com/', origin: 'https://www.facebook.com', pathname: '/', search: '' },
+    document: {
+      title: 'Facebook',
+      body: {
+        appendChild: () => {}
+      },
+      createElement: (tag) => {
+        if (tag === 'button') return mockBar;
+        return {
+          setAttribute: () => {},
+          addEventListener: () => {},
+          classList: { add: () => {}, remove: () => {} },
+          style: {}
+        };
+      },
+      querySelector: () => null,
+      querySelectorAll: () => [],
+      addEventListener: () => {}
+    },
+    chrome: {
+      runtime: {
+        sendMessage: (msg, cb) => {
+          sentMessages.push(msg);
+          if (cb) cb({ success: true, taskId: 'test-task-123' });
+        },
+        onMessage: { addListener: () => {} },
+        lastError: null
+      },
+      storage: {
+        local: {
+          get: (keys, cb) => {
+            cb({ interceptDownloads: true, showFloatingBar: true, sniffImages: true });
+          }
+        },
+        onChanged: { addListener: () => {} }
+      }
+    },
+    showFloatingBarEnabled: true,
+    recentStreams: [{ url: 'https://video.xx.fbcdn.net/v/t39.2548-2/123.mp4', mime: 'video/mp4', referrer: 'https://www.facebook.com/' }],
+    currentBar: null,
+    currentTargetEl: null,
+    removeFloatingBar: () => {},
+    updateBarVisibility: () => {},
+    positionBar: () => {}
+  });
+  c.window.top = c.window.self;
+
+  const fnCode = source.slice(source.indexOf('function isVideoIframe('), source.indexOf('function positionBar('));
+  vm.runInContext(fnCode, c);
+
+
+  // 1. isVideoWatchPage checks
+  assert.equal(c.isVideoWatchPage('https://www.facebook.com/'), false, 'Facebook home feed must NOT be a watch page');
+  assert.equal(c.isVideoWatchPage('https://www.facebook.com/watch/?v=987654321'), true, 'Facebook /watch page must be a watch page');
+  assert.equal(c.isVideoWatchPage('https://www.facebook.com/reel/123456789'), true, 'Facebook /reel page must be a watch page');
+  assert.equal(c.isVideoWatchPage('https://www.youtube.com/'), false, 'YouTube home feed must NOT be a watch page');
+  assert.equal(c.isVideoWatchPage('https://www.youtube.com/watch?v=dQw4w9WgXcQ'), true, 'YouTube /watch page must be a watch page');
+
+  // 2. findVideoPostPermalink checks
+  const permalink = c.findVideoPostPermalink(fbFeedVideo);
+  assert(permalink && permalink.includes('987654321'), 'findVideoPostPermalink must extract Facebook watch permalink from article container');
+  assert(!permalink.includes('__cft__'), 'findVideoPostPermalink must strip Facebook tracking parameters');
+
+  // 3. getMediaDetails on Facebook feed video must NOT return bare "https://www.facebook.com/"
+  const mediaDetails = c.getMediaDetails(fbFeedVideo);
+  assert.notEqual(mediaDetails.url, 'https://www.facebook.com/', 'getMediaDetails must NEVER return bare https://www.facebook.com/ on feed video');
+
+  // 4. Click floating bar on Facebook feed video -> must dispatch the permalink, NEVER bare "https://www.facebook.com/"!
+  c.createFloatingBar(fbFeedVideo, mediaDetails);
+  assert(barListeners.click, 'Floating bar click listener must be registered');
+
+  const fakeEvent = { isTrusted: true, stopPropagation: () => {}, preventDefault: () => {} };
+  barListeners.click(fakeEvent);
+
+  assert.equal(sentMessages.length, 1, 'Click must dispatch download_media');
+  assert.equal(sentMessages[0].action, 'download_media');
+  assert.equal(sentMessages[0].url, 'https://www.facebook.com/watch/?v=987654321', 'Must dispatch post permalink');
+  assert.notEqual(sentMessages[0].url, 'https://www.facebook.com/', 'Must NEVER dispatch bare https://www.facebook.com/');
+
+  // 5. Test video with direct CDN src (fbcdn.net) without permalink
+  sentMessages.length = 0;
+  const cdnVideo = {
+    tagName: 'VIDEO',
+    currentSrc: 'https://video.xx.fbcdn.net/v/t39.2548-2/direct_video.mp4',
+    closest: () => null,
+    querySelector: () => null,
+    getBoundingClientRect: () => ({ width: 640, height: 360, top: 100, left: 100, right: 740, bottom: 460 })
+  };
+  const cdnMedia = c.getMediaDetails(cdnVideo);
+  assert.equal(cdnMedia.url, 'https://video.xx.fbcdn.net/v/t39.2548-2/direct_video.mp4');
+  c.createFloatingBar(cdnVideo, cdnMedia);
+  barListeners.click(fakeEvent);
+  assert.equal(sentMessages.length, 1);
+  assert.equal(sentMessages[0].url, 'https://video.xx.fbcdn.net/v/t39.2548-2/direct_video.mp4');
+
+  // 6. Test blob video without permalink -> must resolve from recentStreams
+  sentMessages.length = 0;
+  const blobOnlyVideo = {
+    tagName: 'VIDEO',
+    currentSrc: 'blob:https://www.facebook.com/isolated-blob',
+    closest: () => null,
+    querySelector: () => null,
+    getBoundingClientRect: () => ({ width: 640, height: 360, top: 100, left: 100, right: 740, bottom: 460 })
+  };
+  const blobMedia = c.getMediaDetails(blobOnlyVideo);
+  assert.equal(blobMedia.url, 'https://video.xx.fbcdn.net/v/t39.2548-2/123.mp4', 'Blob video must resolve from sniffed stream');
+  c.createFloatingBar(blobOnlyVideo, blobMedia);
+  barListeners.click(fakeEvent);
+  assert.equal(sentMessages.length, 1);
+  assert.equal(sentMessages[0].url, 'https://video.xx.fbcdn.net/v/t39.2548-2/123.mp4');
+});

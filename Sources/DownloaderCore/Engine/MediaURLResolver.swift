@@ -112,6 +112,17 @@ public struct MediaURLResolver: Sendable {
             }
         }
 
+        if URLNormalizer.isBarePlatformHomeURL(url) {
+            return ResolvedMedia(
+                directURL: url,
+                title: "Trang chủ",
+                suggestedFilename: "unsupported.mp4",
+                isHLS: false,
+                headers: customHeaders ?? [:],
+                extractor: "unsupported_bare_home"
+            )
+        }
+
         // 1. If it's already a direct file, return directly
         if isDirectMediaURL(url) {
             let isHLS = url.pathExtension.lowercased() == "m3u8"
@@ -156,7 +167,7 @@ public struct MediaURLResolver: Sendable {
         cookies: String? = nil
     ) async -> (size: Int64, title: String?) {
         // 1. Nếu là video platform URL hoặc yt-dlp có thể trích xuất
-        if URLNormalizer.isVideoPlatformURL(url) || (!isDirectMediaURL(url) && findYtDlpBinary() != nil) {
+        if (URLNormalizer.isVideoPlatformURL(url) && !URLNormalizer.isBarePlatformHomeURL(url)) || (!isDirectMediaURL(url) && findYtDlpBinary() != nil && !URLNormalizer.isBarePlatformHomeURL(url)) {
             if let ytdlp = findYtDlpBinary() {
                 if let result = await probeWithYtDlp(binaryPath: ytdlp, url: url, userAgent: userAgent, cookies: cookies) {
                     return result

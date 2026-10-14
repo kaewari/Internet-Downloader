@@ -419,6 +419,17 @@ public final class DownloadManager: @unchecked Sendable {
                 cookies: currentTask.cookies
             )
             if isCancelledOrInactive(currentTask.id) { return }
+            if resolved.extractor == "unsupported_bare_home" || URLNormalizer.isBarePlatformHomeURL(resolved.directURL) {
+                let host = currentTask.url.host ?? "trang chủ"
+                if !Task.isCancelled, var failedTask = try? store.getTask(id: currentTask.id), failedTask.status != .paused {
+                    failedTask.status = .failed
+                    failedTask.errorMessage = "Liên kết là trang chủ hoặc bảng tin (\(host)), không chứa ID video cụ thể. Vui lòng mở bài viết hoặc video cụ thể để tải."
+                    failedTask.speed = 0
+                    try? store.saveTask(failedTask)
+                }
+                onTasksChanged?()
+                return
+            }
             if resolved.directURL != currentTask.url {
                 currentTask.url = resolved.directURL
                 if currentTask.filename == "download" || currentTask.filename.isEmpty {
@@ -604,7 +615,7 @@ public final class DownloadManager: @unchecked Sendable {
             let isMediaCandidate = [
                 "mp4", "mkv", "avi", "mov", "webm", "flv", "ts", "m3u8", "mpd",
                 "mp3", "wav", "flac", "aac", "m4a", "ogg"
-            ].contains(ext) || URLNormalizer.isVideoPlatformURL(currentTask.url)
+            ].contains(ext) || (URLNormalizer.isVideoPlatformURL(currentTask.url) && !URLNormalizer.isBarePlatformHomeURL(currentTask.url))
 
             if isMediaCandidate, let ytdlp = MediaURLResolver.findYtDlpBinary(), !isCancelledOrInactive(taskId) {
                 do {

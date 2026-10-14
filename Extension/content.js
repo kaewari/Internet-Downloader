@@ -204,16 +204,29 @@
 
     // 1. Thẻ Video
     if (el.tagName === "VIDEO") {
-      if (typeof isVideoPlatform === "function" && isVideoPlatform()) {
+      if (typeof isVideoWatchPage === "function" && isVideoWatchPage()) {
         return { url: window.location.href, type: "video", label: "Tải video này" };
+      }
+      const permalink = typeof findVideoPostPermalink === "function" ? findVideoPostPermalink(el) : null;
+      if (permalink) {
+        return { url: permalink, type: "video", label: "Tải video này" };
       }
       let src = el.currentSrc || el.src;
       if (!src && el.querySelector) {
         const source = el.querySelector("source");
         if (source) src = source.src;
       }
-      return { url: src || window.location.href, type: "video", label: "Tải video này" };
+      if (src && !src.startsWith("blob:") && !src.startsWith("data:") && src.startsWith("http")) {
+        return { url: src, type: "video", label: "Tải video này" };
+      }
+      const sniffedBest = typeof getBestStreamFromRecent === "function" ? getBestStreamFromRecent(recentStreams) : null;
+      if (sniffedBest) {
+        return { url: sniffedBest, type: "video", label: "Tải video này" };
+      }
+      const defaultUrl = (src && !src.startsWith("blob:")) ? src : window.location.href;
+      return { url: defaultUrl, type: "video", label: "Tải video này" };
     }
+
 
     // 2. Thẻ Audio
     if (el.tagName === "AUDIO") {
@@ -346,7 +359,7 @@
   const browserHandles = new Set();
 
   function isVideoPlatform() {
-    const host = window.location.hostname.toLowerCase();
+    const host = (typeof window !== "undefined" && window.location ? window.location.hostname : "").toLowerCase();
     const platforms = [
       "youtube.com", "youtu.be", "tiktok.com", "facebook.com", "fb.watch", "fb.com",
       "instagram.com", "threads.net", "twitter.com", "x.com", "vimeo.com", "dailymotion.com",
@@ -354,6 +367,135 @@
     ];
     return platforms.some(p => host.includes(p));
   }
+
+  function isVideoWatchPage(url) {
+    const u = url || (typeof window !== "undefined" && window.location ? window.location.href : "");
+    if (!u) return false;
+    try {
+      const parsed = new URL(u);
+      const host = parsed.hostname.toLowerCase();
+      const path = parsed.pathname.toLowerCase();
+      const search = parsed.search.toLowerCase();
+
+      if (host.includes("youtube.com")) {
+        return path === "/watch" || path.startsWith("/shorts/") || path.startsWith("/live/") || search.includes("v=");
+      }
+      if (host.includes("youtu.be")) return path.length > 1;
+      if (host.includes("facebook.com") || host.includes("fb.com") || host.includes("fb.watch")) {
+        if (host.includes("fb.watch")) return path.length > 1;
+        return path.includes("/watch") || path.includes("/reel/") || path.includes("/videos/") ||
+               path.includes("/video.php") || path.includes("/story.php") || search.includes("v=");
+      }
+      if (host.includes("tiktok.com")) {
+        return path.includes("/video/") || path.startsWith("/v/");
+      }
+      if (host.includes("instagram.com")) {
+        return path.includes("/reel/") || path.includes("/reels/") || path.includes("/p/") || path.includes("/tv/");
+      }
+      if (host.includes("twitter.com") || host.includes("x.com")) {
+        return path.includes("/status/");
+      }
+      if (host.includes("reddit.com")) {
+        return path.includes("/comments/") || host.includes("v.redd.it");
+      }
+      return false;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  function isBarePlatformHomeURL(url) {
+    if (!url) return false;
+    try {
+      const u = new URL(url);
+      const host = u.hostname.toLowerCase();
+      const path = u.pathname.replace(/\/+$/, "").toLowerCase();
+      const platforms = ["facebook.com", "fb.com", "youtube.com", "tiktok.com", "instagram.com", "twitter.com", "x.com", "reddit.com"];
+      if (!platforms.some(p => host.includes(p))) return false;
+      if (!path || path === "" || path === "/" || path === "/home" || path === "/feed" || path === "/foryou" || path === "/explore") {
+        return !u.searchParams.has("v");
+      }
+      return false;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  function findVideoPostPermalink(targetEl) {
+    if (!targetEl || !targetEl.closest) return null;
+    try {
+      const host = (typeof window !== "undefined" && window.location ? window.location.hostname : "").toLowerCase();
+
+      // Facebook Feed / Groups / Page
+      if (host.includes("facebook.com") || host.includes("fb.com")) {
+        const post = targetEl.closest(
+          "div[role='article'], div[data-pagelet*='FeedUnit'], div[role='feed'] > div, div[data-virtualized], div[data-visualcompletion='ignore-dynamic-view']"
+        );
+        if (post) {
+          const link = post.querySelector(
+            "a[href*='/watch'], a[href*='/reel/'], a[href*='/videos/'], a[href*='/posts/'], a[href*='permalink.php'], a[href*='fb.watch']"
+          );
+          if (link && link.href) {
+            try {
+              const u = new URL(link.href, window.location.origin);
+              return u.origin + u.pathname + (u.searchParams.has("v") ? `?v=${u.searchParams.get("v")}` : "");
+            } catch (_) {
+              return link.href;
+            }
+          }
+        }
+      }
+
+      // YouTube Feed / Browse / Channel / Shorts Shelf
+      if (host.includes("youtube.com")) {
+        const item = targetEl.closest(
+          "ytd-rich-item-renderer, ytd-video-renderer, ytd-grid-video-renderer, ytd-compact-video-renderer, ytd-reel-item-renderer, ytd-playlist-video-renderer"
+        );
+        if (item) {
+          const link = item.querySelector("a#thumbnail[href*='/watch'], a#thumbnail[href*='/shorts/'], a[href*='/watch?v='], a[href*='/shorts/']");
+          if (link && link.href) return link.href;
+        }
+      }
+
+      // TikTok Feed / Profile
+      if (host.includes("tiktok.com")) {
+        const item = targetEl.closest("[data-e2e='feed-item'], [data-e2e='recommend-list-item-container'], [data-e2e='user-post-item']");
+        if (item) {
+          const link = item.querySelector("a[href*='/video/']");
+          if (link && link.href) return link.href;
+        }
+      }
+
+      // Twitter / X Timeline
+      if (host.includes("twitter.com") || host.includes("x.com")) {
+        const article = targetEl.closest("article");
+        if (article) {
+          const link = article.querySelector("a[href*='/status/']");
+          if (link && link.href) return link.href;
+        }
+      }
+
+      // Instagram Feed / Explore
+      if (host.includes("instagram.com")) {
+        const post = targetEl.closest("article, div[role='dialog']");
+        if (post) {
+          const link = post.querySelector("a[href*='/p/'], a[href*='/reel/']");
+          if (link && link.href) return link.href;
+        }
+      }
+
+      // Reddit Feed / Subreddit
+      if (host.includes("reddit.com")) {
+        const post = targetEl.closest("shreddit-post, [data-testid='post-container']");
+        if (post) {
+          const link = post.querySelector("a[slot='full-post-link'], a[data-click-id='body'], a[href*='/comments/']");
+          if (link && link.href) return link.href;
+        }
+      }
+    } catch (_) {}
+    return null;
+  }
+
 
   function getBestStreamFromRecent(streams) {
     if (!streams || !streams.length) return null;
@@ -455,10 +597,18 @@
 
       // 1. Nền tảng video trực tuyến (YouTube, TikTok, Facebook,...):
       // Gửi URL trang (window.location.href) cho Swift MediaURLResolver/yt-dlp
-      // BẮT BUỘC ưu tiên hàng đầu để tải trọn vẹn video chất lượng cao có âm thanh,
-      // không bị chặn bởi manifest.webmanifest hoặc các chunk MSE phân mảnh rời rạc
-      if (isVideoPlatform()) {
+      // BẮT BUỘC ưu tiên khi đang ở trang xem video cụ thể (watch/reel/shorts/video/status)
+      if (typeof isVideoWatchPage === "function" && isVideoWatchPage(window.location.href)) {
         dispatchDownload(window.location.href);
+        return;
+      }
+
+      // 1b. Nếu ở trên Bảng tin / Trang chủ video (Facebook Feed, YouTube Home, TikTok FYP, Twitter Timeline):
+      // Tuyệt đối KHÔNG gửi window.location.href trang chủ cho yt-dlp vì sẽ bị Unsupported URL.
+      // Tìm permalink cụ thể của bài viết trong DOM
+      const postPermalink = typeof findVideoPostPermalink === "function" ? findVideoPostPermalink(targetEl) : null;
+      if (postPermalink) {
+        dispatchDownload(postPermalink);
         return;
       }
 
@@ -482,13 +632,19 @@
         return;
       }
 
-      // 3. Nếu URL là direct (không phải blob:), tải trực tiếp
-      if (media.url && !media.url.startsWith("blob:")) {
+      // 3. Nếu video có URL trực tiếp (không phải blob: và không phải URL trang chủ rỗng), tải trực tiếp
+      const directSrc = targetEl && (targetEl.currentSrc || targetEl.src);
+      if (directSrc && !directSrc.startsWith("blob:") && !directSrc.startsWith("data:") && directSrc.startsWith("http")) {
+        dispatchDownload(directSrc, window.location.href);
+        return;
+      }
+      if (media.url && !media.url.startsWith("blob:") && !media.url.startsWith("data:") && media.url.startsWith("http") &&
+          !(typeof isBarePlatformHomeURL === "function" && isBarePlatformHomeURL(media.url))) {
         dispatchDownload(media.url, media.referrer);
         return;
       }
 
-      // 4. Nếu là blob: (MSE player trên các web thông thường), tìm luồng stream tốt nhất (.m3u8, .mpd, .mp4) đã bắt được
+      // 4. Nếu là blob: (MSE player trên các web thông thường/Facebook feed), tìm luồng stream tốt nhất (.m3u8, .mpd, .mp4, fbcdn) đã bắt được
       const resolved = getBestStreamItem(recentStreams);
       if (resolved) {
         dispatchDownload(resolved.url, resolved.referrer);
@@ -506,6 +662,7 @@
           showDownloadToast("Vui lòng bấm phát video để ứng dụng bắt luồng media.", "info");
         }
       });
+
     });
 
     bar.addEventListener("mouseenter", () => {
@@ -728,7 +885,7 @@
     scanMediaInNode(document.body);
   }
 
-  const domObserver = new MutationObserver((mutations) => {
+  const domObserver = typeof MutationObserver !== "undefined" ? new MutationObserver((mutations) => {
     if (typeof window !== "undefined" && window.self !== window.top) return;
     for (const mut of mutations) {
       for (const node of mut.addedNodes) {
@@ -745,11 +902,12 @@
         }
       }
     }
-  });
+  }) : null;
 
-  if (document.body) {
+  if (document.body && domObserver) {
     domObserver.observe(document.body, { childList: true, subtree: true });
   }
+
 
   // 3. Lắng nghe Mousemove (hỗ trợ hover video, ảnh lớn, GIF)
   let lastMoveTime = 0;
@@ -978,10 +1136,11 @@
       .replace(/[/\\?%*:|"<>]/g, "-")
       .trim() || "video";
 
-    // 1. Nếu là nền tảng video (YouTube, TikTok, Facebook,...) và có thẻ video trên trang:
+    // 1. Nếu là nền tảng video (YouTube, TikTok, Facebook,...) và đang ở trang xem video cụ thể:
     // Tạo 1 mục duy nhất đại diện cho video/stream chính của trang (tránh nhân bản 20 chunk videoplayback.mp4)
     const pageVideos = Array.from(document.querySelectorAll("video, audio"));
-    if (isVideoPlatform() && pageVideos.some(v => v.tagName.toLowerCase() === "video")) {
+    const onWatchPage = typeof isVideoWatchPage === "function" && isVideoWatchPage(window.location.href);
+    if (onWatchPage && pageVideos.some(v => v.tagName.toLowerCase() === "video")) {
       addMediaItem({
         url: window.location.href,
         name: `${cleanPageTitle}.mp4`,
@@ -1005,8 +1164,8 @@
       }
     });
 
-    // 2. Bổ sung các stream thực từ WebRequest (chỉ khi không phải nền tảng video dùng yt-dlp page URL, và đã lọc bỏ MSE chunks)
-    if (!isVideoPlatform()) {
+    // 2. Bổ sung các stream thực từ WebRequest (khi không phải watch page dùng yt-dlp, hoặc trên feed các stream đã bắt)
+    if (!onWatchPage) {
       for (const stream of recentStreams) {
         if (stream && stream.url && !stream.isChunk && !isChunkOrMseStreamUrl(stream.url)) {
           const isAudio = (stream.mime && stream.mime.includes("audio")) || /\.(mp3|m4a|aac|flac|wav)(\?|$|#)/i.test(stream.url);

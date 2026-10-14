@@ -67,4 +67,17 @@ public struct URLNormalizer: Sendable {
         ]
         return knownPlatforms.contains { host == $0 || host.hasSuffix("." + $0) }
     }
+
+    public static func isBarePlatformHomeURL(_ url: URL) -> Bool {
+        guard isVideoPlatformURL(url) else { return false }
+        let path = url.path.trimmingCharacters(in: CharacterSet(charactersIn: "/")).lowercased()
+        let query = (url.query ?? "").lowercased()
+        let barePaths: Set<String> = ["", "home", "feed", "foryou", "explore"]
+        if barePaths.contains(path) {
+            if !query.contains("v=") && !query.contains("video_id=") && !query.contains("watch") {
+                return true
+            }
+        }
+        return false
+    }
 }
