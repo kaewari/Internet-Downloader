@@ -11,3 +11,4 @@ Downloads/
 logs/
 .runtime/
 __pycache__/
+.agents/

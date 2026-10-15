@@ -398,6 +398,18 @@
       if (host.includes("reddit.com")) {
         return path.includes("/comments/") || host.includes("v.redd.it");
       }
+      if (host.includes("redd.it")) {
+        return path.length > 1;
+      }
+      if (host.includes("vimeo.com")) {
+        return /\/\d+/.test(path) || path.includes("player");
+      }
+      if (host.includes("dailymotion.com")) {
+        return path.includes("/video/");
+      }
+      if (host.includes("bilibili.com")) {
+        return path.includes("/video/");
+      }
       return false;
     } catch (_) {
       return false;
@@ -410,7 +422,7 @@
       const u = new URL(url);
       const host = u.hostname.toLowerCase();
       const path = u.pathname.replace(/\/+$/, "").toLowerCase();
-      const platforms = ["facebook.com", "fb.com", "youtube.com", "tiktok.com", "instagram.com", "twitter.com", "x.com", "reddit.com"];
+      const platforms = ["facebook.com", "fb.com", "youtube.com", "tiktok.com", "instagram.com", "twitter.com", "x.com", "reddit.com", "vimeo.com", "dailymotion.com", "bilibili.com"];
       if (!platforms.some(p => host.includes(p))) return false;
       if (!path || path === "" || path === "/" || path === "/home" || path === "/feed" || path === "/foryou" || path === "/explore") {
         return !u.searchParams.has("v");
