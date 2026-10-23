@@ -7,9 +7,34 @@ final class HTTPRedirectIntegrationTests: XCTestCase {
         server.executableURL = URL(fileURLWithPath:"/usr/bin/python3")
         server.arguments = ["Tests/Fixtures/http_redirect.py"]; server.standardOutput = output; server.standardError = FileHandle.nullDevice
         try server.run(); defer { server.terminate() }
-        var line = Data()
-        while let byte = try output.fileHandleForReading.read(upToCount:1), !byte.isEmpty, byte[0] != 10 { line.append(byte) }
-        let port = try XCTUnwrap(Int(String(decoding:line,as:UTF8.self)))
+        // Fixture phải in đúng 1 dòng "<port>\n" ngay khi listen; chờ tối đa 5s.
+        final class LineBox: @unchecked Sendable { var line = Data(); var readError: Error? }
+        let box = LineBox()
+        let ready = DispatchSemaphore(value: 0)
+        let handle = output.fileHandleForReading
+        DispatchQueue.global().async {
+            do {
+                while true {
+                    guard let byte = try handle.read(upToCount:1), !byte.isEmpty else { break }
+                    if byte[0] == 10 { break }
+                    box.line.append(byte)
+                }
+            } catch { box.readError = error }
+            ready.signal()
+        }
+        guard ready.wait(timeout: .now() + 5) == .success else {
+            XCTFail("Fixture Tests/Fixtures/http_redirect.py không in port trong 5s — kiểm tra `python3 Tests/Fixtures/http_redirect.py` chạy tay và không còn tiến trình chiếm cổng.")
+            throw URLError(.timedOut)
+        }
+        if let readError = box.readError {
+            XCTFail("Đọc port của fixture Tests/Fixtures/http_redirect.py thất bại: \(readError.localizedDescription)")
+            throw readError
+        }
+        let portText = String(decoding: box.line, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let port = Int(portText), !portText.isEmpty else {
+            XCTFail("Fixture Tests/Fixtures/http_redirect.py in port không hợp lệ: '\(portText)' (mong đợi đúng 1 dòng số cổng).")
+            throw URLError(.cannotParseResponse)
+        }
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at:root,withIntermediateDirectories:true); defer { try? FileManager.default.removeItem(at:root) }
         func download(_ route:String, name:String) async throws -> URL {

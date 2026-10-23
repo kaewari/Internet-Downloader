@@ -11,6 +11,8 @@ public struct IPCRequest: Codable, Sendable {
     public let taskId: String?
     public let protocolVersion: Int?
     public let browser: BrowserCommand?
+    /// Khi true, app bắt đầu tải ngay từ browser handoff (bỏ qua hộp thoại xác nhận).
+    public let autoStart: Bool?
 
     public init(
         action: String,
@@ -22,7 +24,8 @@ public struct IPCRequest: Codable, Sendable {
         headers: [String: String]? = nil,
         taskId: String? = nil,
         protocolVersion: Int? = nil,
-        browser: BrowserCommand? = nil
+        browser: BrowserCommand? = nil,
+        autoStart: Bool? = nil
     ) {
         self.action = action
         self.url = url
@@ -34,6 +37,7 @@ public struct IPCRequest: Codable, Sendable {
         self.taskId = taskId
         self.protocolVersion = protocolVersion
         self.browser = browser
+        self.autoStart = autoStart
     }
 }
 

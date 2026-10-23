@@ -42,6 +42,11 @@ let package = Package(
             name: "test-10-sources",
             dependencies: ["DownloaderCore"],
             path: "Sources/Test10Sources"
+        ),
+        .executableTarget(
+            name: "test-app-pipeline",
+            dependencies: ["DownloaderCore"],
+            path: "Sources/TestAppPipeline"
         )
     ]
 )

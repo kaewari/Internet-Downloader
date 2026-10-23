@@ -2,7 +2,53 @@ import Foundation
 
 public struct FileTypeDetector: Sendable {
 
+    /// Sanitize filename cho filesystem macOS: thay ký tự cấm / control chars,
+    /// cap 255 byte, không để name rỗng.
+    public static func sanitizeFilename(_ name: String) -> String {
+        var clean = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        let forbidden = CharacterSet(charactersIn: ":|/\0")
+        clean.unicodeScalars.removeAll { forbidden.contains($0) || $0.value < 32 }
+        clean = clean.trimmingCharacters(in: .whitespacesAndNewlines)
+        if clean.isEmpty { clean = "download" }
+        if clean.count > 200 {
+            let ext = (clean as NSString).pathExtension
+            let base = (clean as NSString).deletingPathExtension
+            clean = ext.isEmpty ? String(base.prefix(200)) : "\(String(base.prefix(190))).\(ext)"
+        }
+        return clean
+    }
+
+    /// Tên file không trùng: file(1).zip, file(2).zip — đúng hành vi IDM.
+    public static func uniqueDestination(in folder: URL, filename: String, fileManager: FileManager = .default) -> URL {
+        var candidate = folder.appendingPathComponent(filename)
+        guard fileManager.fileExists(atPath: candidate.path) else { return candidate }
+        let base = (filename as NSString).deletingPathExtension
+        let ext = (filename as NSString).pathExtension
+        var counter = 1
+        repeat {
+            let name = ext.isEmpty ? "\(base)(\(counter))" : "\(base)(\(counter)).\(ext)"
+            candidate = folder.appendingPathComponent(name)
+            counter += 1
+        } while fileManager.fileExists(atPath: candidate.path) && counter < 1000
+        return candidate
+    }
+
     /// Checks if a string looks like an opaque identifier (UUID, hash, pure hex/digits) without an extension
+    /// Các đuôi tệp mà bộ dò kiểu biết. Đuôi KHÔNG nằm trong tập này được
+    /// coi là "không xác định" → có thể là đuôi sai do URL (ví dụ `format=h.264`)
+    /// và sẽ được sửa lại theo magic byte sau khi tải.
+    public static let knownExtensions: Set<String> = [
+        // Media
+        "mp4", "m4v", "m4a", "mov", "qt", "mkv", "webm", "avi", "flv", "ts", "m3u8", "mpd", "m4s",
+        "mp3", "aac", "flac", "wav", "ogg", "opus", "wma",
+        // Ảnh
+        "jpg", "jpeg", "png", "gif", "webp", "bmp", "svg", "heic", "avif", "tif", "tiff",
+        // Tài liệu / gói
+        "pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "txt", "csv", "epub", "json", "xml",
+        "zip", "rar", "7z", "tar", "gz", "bz2", "xz", "iso", "dmg", "pkg", "xar", "apk", "exe", "msi",
+        "sqlite", "ttf", "otf", "woff", "woff2",
+    ]
+
     public static func isOpaqueIdentifier(_ name: String) -> Bool {
         let clean = name.trimmingCharacters(in: .whitespacesAndNewlines)
         if clean.isEmpty { return true }
@@ -259,6 +305,21 @@ public struct FileTypeDetector: Sendable {
            headerData.starts(with: [0x52, 0x49, 0x46, 0x46]), // RIFF
            headerData.subdata(in: 8..<12) == Data([0x57, 0x45, 0x42, 0x50]) { // WEBP
             return "webp"
+        }
+
+        // 13b. TIFF (little-endian `II*\0` / big-endian `MM\0*`) — ảnh khoa học
+        //     rất phổ biến (ESO, NASA, thiên văn) và trước đây không nhận diện được.
+        if headerData.starts(with: [0x49, 0x49, 0x2a, 0x00]) || headerData.starts(with: [0x4d, 0x4d, 0x00, 0x2a]) {
+            return "tif"
+        }
+
+        // 13c. HEIC / HEIF (ISO-BMFF với brand heic/heix/hevc/hevx/mif1)
+        if headerData.count >= 12,
+           headerData.starts(with: [0x66, 0x74, 0x79, 0x70]), // 'ftyp'
+           let brand = String(data: headerData.subdata(in: 8..<12), encoding: .ascii) {
+            let heifBrands: Set<String> = ["heic", "heix", "hevc", "hevx", "heim", "heis", "hevm", "hevs", "mif1", "msf1"]
+            if heifBrands.contains(brand) { return "heic" }
+            if brand == "avif" || brand == "avis" { return "avif" }
         }
 
         // 14. Fonts: TTF, OTF, WOFF, WOFF2

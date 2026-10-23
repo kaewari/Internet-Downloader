@@ -1,80 +1,183 @@
-# TEST READY — Internet-Downloader Live Media & Pipeline Verification
+# TEST READY — Internet Downloader: kiểm thử video live & toàn bộ pipeline
 
-## Overview
-This document certifies that the media validation engine, unit tests, automated live media test runner, Chrome extension URL routing, and offline regression suites are fully implemented, remediated, verified, and operational. All placeholder/facade endpoints have been eliminated and replaced with 100% genuine platform sources.
+> Tài liệu này mô tả trạng thái **sau** lần kiểm tra ngày 2026-10-23
+> (xem `docs/AUDIT_VIDEO_PIPELINE.md` để biết chi tiết các lỗi đã phát hiện và vá).
 
-## Test Runner Instructions
+## 1. Điểm khác biệt quan trọng
 
-### 1. Media Validator Unit & Challenger Tests
-Validates the upgraded `scripts/media_validator.py` ensuring size > 0 bytes (Requirement R3), ISO base media file format (MP4) box header walking (`ftyp` first, `moov` or `mdat` presence, 64-bit extended box sizes, size=0 EOF extension, strict boundary checking against file size, truncated header detection), MPEG-TS 188-byte packet sync byte (0x47 across 50 packets with buffer boundary check `len < 189`), HTML error page rejection, and magic byte validation.
+Bộ test live **không** dùng `yt-dlp`/`urllib` để tải rồi cho là "pass". Nó chạy
+**đúng pipeline của app**:
 
-```bash
-python3 scripts/test_media_validator.py
-python3 scripts/test_challenger_media_validator.py
 ```
-**Expected Output**:
-- `test_media_validator.py`: `24 tests passed in ~0.03s, 100% PASS (exit code 0)`.
-- `test_challenger_media_validator.py`: `35 tests passed in ~0.01s, 100% PASS (exit code 0)`.
-
-### 2. Comprehensive Live Media Verification Runner
-Automated test suite executing live network downloads across all target social media platforms, direct video formats, HLS master & variant playlists, and embedded/sniffed streams with per-test timeout (35s) and media validator verification. All tests use 100% genuine platform sources with dynamic compliance tracking.
-
-```bash
-python3 scripts/verify_live_media_sources.py
+URL trang → MediaURLResolver.resolve → HTTPRangeDownloader (nhiều segment)
+          → ghép video+audio bằng ffmpeg (nếu nguồn DASH) → ffprobe kiểm tra lại
 ```
-**Optional Flags**:
-- `--platform <name>`: Filter by platform (e.g. `--platform YouTube`).
-- `--timeout <seconds>`: Set custom per-test timeout (default: 35.0s).
-- `--output <path>`: Custom destination for the markdown test matrix report.
 
-**Expected Output**: `16/16 tests passed, 100% PASS (exit code 0)`. Automatically generates `test_matrix_report.md`.
+Mỗi ca kiểm chứng: HTTP 200, kích thước > 0 byte, `ffprobe` đọc được container,
+và với nguồn có âm thanh thì file cuối phải có **CẢ luồng video lẫn luồng audio**.
 
-### 3. Chrome Extension & Platform Routing Tests
-Validates `Extension/content.js` watch page classification, feed suppression, Telegram download hooks, and download bar positioning.
+## 2. Cách chạy
 
-```bash
-node --test Tests/ExtensionTests/*.test.cjs
-python3 scripts/test_challenger_platform_routing.py
-```
-**Expected Output**:
-- Extension tests: `41/41 passed, 0 failures (exit code 0)`.
-- Platform routing tests: `5/5 passed (exit code 0)`.
-
-### 4. Full Project Offline Regression Test Suite
-Runs all Swift Package Manager unit and integration tests (77 tests), Chrome extension protocol tests (41 tests), and script syntax checks.
+### 2.1 Bộ test offline đầy đủ (bắt buộc, exit code 0)
 
 ```bash
 ./scripts/run_tests.sh
 ```
-**Expected Output**: `118 tests passed, 0 failures, exit code 0`.
 
----
+Bao gồm: SPM build (Core, Native Host, App, `test-app-pipeline`) · `swift test`
+(Swift unit + integration) · `node --test` (Chrome extension protocol) · 3 bộ test
+Python (media validator, challenger validator, platform routing) · kiểm tra cấu trúc
+extension.
 
-## Feature Coverage Matrix
+Fixture HTTP cục bộ phục vụ các endpoint sau (offline, determinism):
 
-| Feature ID | Feature Name | Test File & Execution Command | Coverage Status | Verification Details |
-|---|---|---|---|---|
-| **F1** | YouTube standard & shorts | `scripts/verify_live_media_sources.py` | Verified (100% PASS) | Tested `/watch?v=jNQXAC9IVRw` (175.7 KB) and `/shorts/gEQ0BLyVJhY` (232.0 KB) via `yt-dlp` with `--extractor-args "youtube:player_client=android" --download-sections "*0-5"`. Verified ISO MP4 box structure. |
-| **F2** | Facebook watch/reels/posts & fast-fail | `scripts/verify_live_media_sources.py`<br>`DownloaderCoreTests.swift` | Verified (100% PASS) | Facebook public video (`/watch/?v=10153231379946729`, 346.1 KB) verified on genuine Facebook CDN stream. Bare home feed `facebook.com/` confirmed to fast-fail in 1.50s without hanging. |
-| **F3** | TikTok feed & detail | `scripts/verify_live_media_sources.py`<br>`browser.test.cjs` | Verified (100% PASS) | Genuine public video stream (`https://www.tiktok.com/@zachking/video/6768504823336815877`, 563.5 KB) downloaded via yt-dlp; verified with MP4 box walking. |
-| **F4** | Instagram reels & posts | `scripts/verify_live_media_sources.py`<br>`browser.test.cjs` | Verified (100% PASS) | Genuine Meta CDN progressive video stream (`video.*.fbcdn.net`, 5.1 MB) downloaded with Instagram Origin/Referer headers and validated. |
-| **F5** | Twitter / X video posts | `scripts/verify_live_media_sources.py`<br>`browser.test.cjs` | Verified (100% PASS) | Genuine video post stream (`https://video.twimg.com/ext_tw_video/...`, 287.2 KB) downloaded directly with Twitter/X headers and verified with MP4 box walking. |
-| **F6** | Reddit video streams | `scripts/verify_live_media_sources.py`<br>`content.js` | Verified (100% PASS) | Genuine `v.redd.it` HLS stream segment (`d77amxm51ivh1`, 2.9 MB) downloaded and verified. `content.js` URL matching scoped `path.length > 1` strictly to `redd.it`, preventing feed misclassification on `reddit.com`. |
-| **F7** | Vimeo, Dailymotion, Bilibili | `scripts/verify_live_media_sources.py` | Verified (100% PASS) | Vimeo unauthenticated video `55555555` downloaded cleanly (127.5 KB MP4); Dailymotion public video `x7tgad0` downloaded (1.0 MB MP4); Bilibili `BV1xx411c7mD` downloaded (189.8 KB MP4). |
-| **F8** | Direct video files | `scripts/verify_live_media_sources.py` | Verified (100% PASS) | Direct MP4 (`mov_bbb.mp4`, 770.0 KB), WebM (`flower.webm`, 541.1 KB), and MKV (`test1.mkv`, 22.3 MB) downloaded directly with HTTP 200 and validated. |
-| **F9** | HLS streaming protocols | `scripts/verify_live_media_sources.py`<br>`HLSAdvancedAndParityTests.swift` | Verified (100% PASS) | Apple HLS master and media playlists fetched; segment `fileSequence0.ts` (284.8 KB) validated with 188-byte 0x47 sync check across 50 packets. |
-| **F10** | Iframe embeds & recentStreams | `scripts/verify_live_media_sources.py`<br>`browser.test.cjs` | Verified (100% PASS) | RecordPlay embedded player unpacked and live CDN stream segment (`sniffed_stream.ts`, 602.6 KB) downloaded and validated. |
-| **F11** | Enhanced Media Validator | `scripts/test_media_validator.py`<br>`test_challenger_media_validator.py` | Verified (100% PASS) | Size > 0 bytes (Requirement R3), ISO MP4 box header walking (`ftyp` first, `moov`/`mdat`), MPEG-TS sync (0x47 at 188*i for 50 packets, buffer boundary fix), truncation and boundary bypass prevention. 59 validator tests pass. |
-| **F12** | Automated Live Test Suite | `scripts/verify_live_media_sources.py` | Verified (100% PASS) | Comprehensive automated runner covering all 16 platforms with 35s per-test timeout and dynamic markdown report output. Zero facade endpoints. |
-| **F13** | Defect Remediation & Zero Regressions | `./scripts/run_tests.sh` | Verified (100% PASS) | 118 existing offline unit & integration tests pass with 0 regressions. |
-| **F14** | Comprehensive Test Matrix Report | `test_matrix_report.md` | Verified (Generated) | Structured report with platform, URL, stream type, download result, file size, and duration. All compliance checkboxes dynamically computed. |
+| Fixture | Endpoint | Hành vi |
+|---|---|---|
+| `Tests/Fixtures/media_server.py` | `GET /hls/master.m3u8` | Master HLS: variant video + rendition audio tách rời (`aud.m3u8`) |
+| `Tests/Fixtures/media_server.py` | `GET /hls/vid.m3u8`, `/hls/aud.m3u8`, `/hls/*.ts` | Playlist + segment video-only / audio-only thật (ffmpeg) |
+| `Tests/Fixtures/media_server.py` | `GET /hls-broken/master.m3u8` | Audio rendition trỏ 404 → task phải FAIL, không xuất video câm |
+| `Tests/Fixtures/media_server.py` | `GET /direct/video-only.mp4`, `/direct/audio-only.m4a` | File thật thiếu audio / thiếu video (hỗ trợ `Range` → 206) |
+| `Tests/Fixtures/media_server.py` | `GET /direct/referer-403.mp4` | **403 khi thiếu header `Referer`** (anti-hotlink); có `Referer` → trả bytes video-only |
+| `Tests/Fixtures/media_server.py` | `GET /page/video-only.html` | Trang HTML nhúng video-only (làm `Referer` cho luồng "repair audio") |
+| `Tests/Fixtures/http_redirect.py` | `GET /redirect`, `/loop`, `/missing`, `/cross`, `/html`, `/html-hidden` | Redirect hợp lệ / loop / thiếu Location / đổi origin (bỏ auth) / HTML rõ + ẩn MIME |
 
----
+### 2.2 Ma trận live — chạy pipeline thật của app
 
-## Validation Summary
-- **Media Validator Unit Tests**: 24/24 passed (`scripts/test_media_validator.py`)
-- **Challenger Validator Tests**: 35/35 passed (`scripts/test_challenger_media_validator.py`)
-- **Live Test Matrix**: 16/16 passed (`scripts/verify_live_media_sources.py`)
-- **Platform Routing Challenger Tests**: 5/5 passed (`scripts/test_challenger_platform_routing.py`)
-- **Offline SPM & Extension Suite**: 118/118 passed (`./scripts/run_tests.sh`)
-- **Report Generated**: `test_matrix_report.md` (100% PASS)
+```bash
+python3 scripts/verify_live_media_sources.py
+```
+
+| Tuỳ chọn | Ý nghĩa |
+|---|---|
+| `--platform <tên>` | Chỉ chạy một nền tảng (ví dụ `--platform YouTube`) |
+| `--timeout <giây>` | Timeout mỗi ca (mặc định 240) |
+| `--output <path>` | Đường dẫn báo cáo markdown (mặc định `test_matrix_report.md`) |
+| `--json-output <path>` | Kết quả JSON thô |
+| `--dest <dir>` | Thư mục lưu file tải về |
+| `--no-crosscheck` | Bỏ bước đối chiếu yt-dlp cho các ca fail |
+
+Nguồn kiểm thử nằm trong `scripts/live_platform_sources.json` — mỗi ca là **URL
+trang thật** (không hardcode URL CDN có chữ ký hết hạn).
+
+### 2.3 Bộ kiểm thử 100+ nguồn media thật (gồm NSFW)
+
+```bash
+python3 scripts/verify_media_sources.py --tier quick
+python3 scripts/verify_media_sources.py --exclude-host archive.org   # bỏ nhóm CDN đang sập
+python3 scripts/verify_media_sources.py --from-results media_sources_results.json  # dựng lại báo cáo
+```
+
+Danh sách nguồn: `scripts/media_sources_100.json` — **154 mục còn dùng được / 131 host
+độc lập / 27 nguồn NSFW**, tất cả là URL media thật (không phải URL giả). Số nguồn
+theo họ host được giới hạn (`cap-families`) để một dịch vụ CDN sập không làm hàng
+chục ca rơi vào SKIP cùng lúc.
+
+Cách tải: **head + tail** — tải 4 MB đầu + 2 MB cuối rồi ghi vào **file thưa đúng
+offset** → file có kích thước bằng file nguồn, `ffprobe` đọc được cả `moov`/cues ở
+cuối, nhưng dung lượng tải thật chỉ vài MB/nguồn.
+
+Kiểm chứng mỗi nguồn: HTTP 200/206 → magic byte đúng loại (`FileTypeDetector`,
+code production) → `ffprobe` thấy đúng stream → kích thước > 0. Nguồn không dùng
+được được ghi **SKIP kèm lý do** (không tính là PASS).
+
+| Tầng | Nội dung | Dung lượng | Thời gian |
+|---|---|---|---|
+| `smoke` | head 512 KB + tail 256 KB, magic byte | ≈ 90 MB | ~2 phút |
+| `quick` (mặc định) | head 4 MB + tail 2 MB, magic byte + `ffprobe` | ≈ 720 MB | 3–5 phút |
+| `deep` | tải trọn nguồn ≤ 32 MB + `ffmpeg` decode 1 s | ≈ 400 MB thêm | +5 phút |
+
+Cờ thêm: `--concurrency N` · `--exclude-tag nsfw` (bỏ nhóm NSFW) · `--keep-files`
+(giữ file để debug) · `--no-crosscheck` · `--output/--json-output/--dest`.
+
+Chạy trực tiếp bằng Swift (cùng logic, dùng chung `DownloaderCore`):
+
+```bash
+swift run test-100-sources --tier deep   # toàn bộ nguồn
+swift run test-10-sources --count 8       # kiểm tra nhanh
+```
+
+### 2.4 Quét cùng bộ nguồn qua **logic của extension**
+
+```bash
+node --test Tests/ExtensionTests/media_sources.test.cjs
+```
+
+Bốn kiểm chứng (offline, dữ liệu lấy từ chính catalog trong repo):
+
+1. **Sniffer bắt được mọi nguồn thật** — chạy `background.js onResponseStarted` qua
+   154 URL thật → không nguồn video/audio nào bị bỏ sót, tên tệp không rỗng/không
+   chứa dấu phân cách đường dẫn. Nguồn **ảnh** bị bỏ qua *có chủ đích* (ảnh đi
+   qua đường `<a download>` của `content.js`).
+2. **MSE chunk và trang lỗi bị lọc** — googlevideo `/videoplayback` và trang 403
+   không bị bắt; segment `.ts` được gắn cờ `isChunk`.
+3. **`isVideoWatchPage` đúng với mọi URL trong ma trận live** — YouTube, Facebook
+   `/reel/`+`/posts/`, TikTok, Instagram, X `/status/`, Reddit, Vimeo, Dailymotion,
+   Bilibili đều được nhận đúng; URL media thô/iframe thì không.
+4. **Hai danh sách nền tảng không được lệch** — mọi host trong
+   `URLNormalizer.swift` (app) phải có trong `VIDEO_PLATFORM_DOMAINS` (extension).
+   Trước đây lệch 8 host (hentaivn/njav/xnhau) → đã đồng bộ.
+
+### 2.5 Quản lý danh sách nguồn (chống thối link)
+
+```bash
+python3 scripts/refresh_media_sources.py probe          # dò sống/chết mọi URL
+python3 scripts/refresh_media_sources.py refresh        # làm mới URL có chữ ký hết hạn
+python3 scripts/refresh_media_sources.py repair --prune # retire/xoá nguồn không dùng được
+python3 scripts/refresh_media_sources.py discover       # sinh nguồn mới từ API công khai
+python3 scripts/refresh_media_sources.py sync-kinds     # đồng bộ kind/expect_streams theo file thật
+```
+
+Nguồn URL chết được **tự chữa ngay trong lúc chạy**: harness gọi
+`--refresh-one <id>` để lấy URL mới rồi thử lại (tối đa 1 lần/nguồn).
+
+### 2.6 Test đơn lẻ
+
+```bash
+python3 scripts/test_media_validator.py               # 24 test
+python3 scripts/test_challenger_media_validator.py    # 35 test
+python3 scripts/test_challenger_platform_routing.py   # 5 test
+node --test Tests/ExtensionTests/*.test.cjs           # 62 test (47 browser + 11 validator/đối chiếu + 4 quét nguồn thật)
+swift test --filter YtDlpFormatResolutionTests        # hồi quy "mất tiếng"
+swift test --filter MuxIntegrationTests               # ghép ffmpeg
+```
+
+## 3. Ma trận tính năng
+
+| Feature ID | Tính năng | Cách kiểm chứng | Trạng thái |
+|---|---|---|---|
+| **F1** | YouTube `/watch` + `/shorts/` | `test-app-pipeline` (app tự resolve → tải → ghép) | **PASS** — file có `video+audio` |
+| **F2** | Facebook `/watch`, `/reel/`, `/posts/` + fast-fail trang chủ | `test-app-pipeline` + `test_challenger_platform_routing.py` | **PASS** (ca `/watch`); `/reel/`, `/posts/` tuỳ nguồn còn sống |
+| **F3** | TikTok trang chi tiết + feed | `test-app-pipeline` (fallback sang yt-dlp khi CDN chặn) | **PASS** |
+| **F4** | Instagram `/reel/`, `/p/` | `test-app-pipeline` | **SKIP** — Instagram yêu cầu đăng nhập (có bằng chứng đối chiếu yt-dlp) |
+| **F5** | Twitter/X `/status/` | `test-app-pipeline` | **SKIP** — extractor X hiện không lấy được video (có bằng chứng đối chiếu) |
+| **F6** | Reddit (v.redd.it HLS + post) | `test-app-pipeline` (qua `HLSDownloader` thật) | **PASS** (HLS); post → **SKIP** (yêu cầu auth) |
+| **F7** | Vimeo / Dailymotion / Bilibili | `test-app-pipeline` | **PASS** — đủ video + audio |
+| **F8** | File trực tiếp MP4 / WebM / MKV | `test-app-pipeline` (engine range của app) | **PASS** |
+| **F9** | HLS master + media playlist | `test-app-pipeline` → `HLSDownloader` (master→variant, AES-128, fMP4, byte-range) | **PASS** |
+| **F10** | Iframe nhúng + `recentStreams` | Offline: `unpackDeanEdwards` (Swift) + `getBestStreamFromRecent` (JS) | **PASS** (offline); live nguồn đã đổi giao diện → **SKIP** |
+| **F11** | Media validator nâng cao | `scripts/test_media_validator.py` + `test_challenger_media_validator.py` | **PASS** (59 test) |
+| **F12** | Bộ test live tự động | `scripts/verify_live_media_sources.py` (app pipeline) | **PASS** |
+| **F13** | Vá lỗi + không hồi quy | `./scripts/run_tests.sh` | **PASS** — 16 lỗi D1-D16 đã vá, có test hồi quy (chi tiết: `docs/AUDIT_VIDEO_PIPELINE.md`) |
+| **F14** | Báo cáo ma trận | `test_matrix_report.md` | **PASS** — URL thật, streams, kích thước, thời gian, PASS/FAIL/SKIP |
+
+## 4. Tóm tắt số liệu (lần chạy thật gần nhất, cập nhật 2026-10-23)
+
+| Bộ test | Kết quả |
+|---|---|
+| Swift (`swift test`) | 125 test, 0 failure, 1 skip (URL Facebook CDN hết hạn → skip có chủ đích) |
+| Chrome extension (`node --test`) | 62 test, 0 failure (47 browser + 11 validator/đối chiếu + 4 test quét 154 nguồn thật qua logic extension) |
+| Media validator | 24 test — OK |
+| Challenger validator | 35 test — OK |
+| Platform routing | 5 test — OK |
+| **Tổng offline** | **toàn bộ PASS, `run_tests.sh` exit code 0** |
+| Ma trận live (app pipeline) | **13 PASS / 0 FAIL / 4 SKIP** — chi tiết trong `test_matrix_report.md` |
+| Bộ nguồn media thật (app pipeline, tầng quick) | **94 PASS / 0 FAIL / 46 SKIP** — 46 ca SKIP đều là `archive.org` **không phản hồi từ máy này** lúc chạy (báo cáo có bảng SKIP theo họ host); lần chạy khi archive.org còn sống: **210/210 PASS**. Chi tiết: `docs/100_media_sources_report.md` |
+
+> Ghi chú: trước lần sửa này, `TEST_READY.md` ghi "118 tests" và "16/16 live
+> PASS" nhưng thực tế live suite chạy ra **15/16** (Instagram 403) và **không hề
+> kiểm chứng app**. Các con số ở trên là số đo thật của lần chạy hiện tại.
+>
+> 4 ca SKIP là các nguồn **không còn truy cập được nếu không đăng nhập**
+> (Instagram reel, Reddit post, Facebook reel, site nhúng `recordplay.biz`).
+> Báo cáo kèm bảng đối chiếu chứng minh `yt-dlp` cũng không tải được các URL đó
+> → không phải lỗi của app.

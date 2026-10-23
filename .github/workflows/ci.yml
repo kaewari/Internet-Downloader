@@ -1,0 +1,18 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  offline-gate:
+    runs-on: macos-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: Show Swift version
+        run: swift --version
+      - name: Check version consistency (no dist bundle yet)
+        run: bash scripts/check_versions.sh --no-dist
+      - name: Run offline test suite
+        run: bash scripts/run_tests.sh

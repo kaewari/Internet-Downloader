@@ -1,13 +1,23 @@
 import SwiftUI
 import DownloaderCore
 
-public struct SegmentVisualizerView: View {
+/// Equatable theo nội dung hiển thị để SwiftUI bỏ qua lần render không đổi (C-F2).
+/// `segments` đã được ViewModel throttle 3Hz trước khi truyền xuống đây (C-F1).
+public struct SegmentVisualizerView: View, Equatable {
     public let segments: [DownloadSegment]
     public let totalBytes: Int64
 
     public init(segments: [DownloadSegment], totalBytes: Int64) {
         self.segments = segments
         self.totalBytes = totalBytes
+    }
+
+    public static func == (lhs: SegmentVisualizerView, rhs: SegmentVisualizerView) -> Bool {
+        lhs.totalBytes == rhs.totalBytes
+            && lhs.segments.count == rhs.segments.count
+            && zip(lhs.segments, rhs.segments).allSatisfy {
+                $0.id == $1.id && $0.progress == $1.progress && $0.status == $1.status
+            }
     }
 
     public var body: some View {
@@ -42,6 +52,8 @@ public struct SegmentVisualizerView: View {
                             SegmentBar(segment: segment, width: segmentWidth(for: segment, in: geometry.size.width))
                         }
                     }
+                    // Gom toàn bộ bar thành 1 layer GPU thay vì N view riêng (C-F2).
+                    .drawingGroup()
                 }
                 .frame(height: 18)
 
@@ -69,6 +81,14 @@ public struct SegmentVisualizerView: View {
         .padding(10)
         .background(Color(NSColor.controlBackgroundColor))
         .cornerRadius(8)
+        .accessibilityLabel("Trực quan phân đoạn tải")
+        .accessibilityValue(segments.isEmpty
+            ? "Đơn luồng"
+            : "\(segments.count) kết nối, \(completedCount)/\(segments.count) xong")
+    }
+
+    private var completedCount: Int {
+        segments.filter { $0.status == .completed }.count
     }
 
     private func segmentWidth(for segment: DownloadSegment, in totalWidth: CGFloat) -> CGFloat {
@@ -98,9 +118,23 @@ public struct SegmentVisualizerView: View {
     }
 }
 
-private struct SegmentBar: View {
+/// Cache LinearGradient static theo status — không tạo mới mỗi tick (C-F2).
+private struct SegmentBar: View, Equatable {
     let segment: DownloadSegment
     let width: CGFloat
+
+    private static let completedGradient = LinearGradient(colors: [.green, .mint], startPoint: .leading, endPoint: .trailing)
+    private static let downloadingGradient = LinearGradient(colors: [.blue, .cyan], startPoint: .leading, endPoint: .trailing)
+    private static let pausedGradient = LinearGradient(colors: [.orange, .yellow], startPoint: .leading, endPoint: .trailing)
+    private static let failedGradient = LinearGradient(colors: [.red, .orange], startPoint: .leading, endPoint: .trailing)
+    private static let idleGradient = LinearGradient(colors: [.gray], startPoint: .leading, endPoint: .trailing)
+
+    static func == (lhs: SegmentBar, rhs: SegmentBar) -> Bool {
+        lhs.segment.id == rhs.segment.id
+            && lhs.segment.progress == rhs.segment.progress
+            && lhs.segment.status == rhs.segment.status
+            && lhs.width == rhs.width
+    }
 
     var body: some View {
         ZStack(alignment: .leading) {
@@ -116,14 +150,11 @@ private struct SegmentBar: View {
 
     private var barGradient: LinearGradient {
         switch segment.status {
-        case .completed:
-            return LinearGradient(colors: [.green, .mint], startPoint: .leading, endPoint: .trailing)
-        case .downloading:
-            return LinearGradient(colors: [.blue, .cyan], startPoint: .leading, endPoint: .trailing)
-        case .paused:
-            return LinearGradient(colors: [.orange, .yellow], startPoint: .leading, endPoint: .trailing)
-        default:
-            return LinearGradient(colors: [.gray], startPoint: .leading, endPoint: .trailing)
+        case .completed: return Self.completedGradient
+        case .downloading: return Self.downloadingGradient
+        case .paused: return Self.pausedGradient
+        case .failed: return Self.failedGradient
+        case .pending: return Self.idleGradient
         }
     }
 }

@@ -1,5 +1,7 @@
 # Review v2 — Internet Downloader, 2026-10-10
 
+> **Snapshot cho 1.1.0/1.3.0** — tài liệu này là snapshot lịch sử tại thời điểm app 1.1.0 / extension 1.3.0 / browser protocol 2 (2026-10-10). Source hiện tại đã ở app 1.2.0 / extension 1.4.0; không dùng số phiên bản trong này để đối chiếu release hiện tại.
+
 **Đã triển khai và cài app 1.1.0, extension source/package 1.3.0, browser protocol 2 trong Internet Downloader hiện tại. Chưa đóng toàn bộ nghiệm thu Telegram.** Chrome thật đã đạt một lát cắt Save video tổng hợp → DownloadItem → file Chrome → nhập app → validation. Telegram Web K/A và ma trận Chrome còn thiếu, giữ NOT VERIFIED.
 
 ## Đối chiếu nguyên nhân và thay đổi

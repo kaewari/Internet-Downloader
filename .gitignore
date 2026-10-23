@@ -12,3 +12,9 @@ logs/
 .runtime/
 __pycache__/
 .agents/
+test_matrix_results.json
+media_sources_results.json
+scripts/media_sources_status.json
+
+# graphify artifact
+graphify-out/

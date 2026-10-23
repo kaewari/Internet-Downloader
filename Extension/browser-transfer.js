@@ -1,6 +1,86 @@
 // Native browser protocol 2. No URL, page locator, cookie or token is persisted.
+//
+// Single source of truth cho phiên bản handshake phía extension. Mirror của
+// `AppVersion.appVersion` trong Sources/DownloaderCore/AppVersion.swift:
+// importScripts() nạp file này trước tiên trong background.js nên hằng số dùng
+// chung được cho cả hello check lẫn ping_host. Lệch phiên bản là nguyên nhân
+// khiến người dùng "bấm tải mà không có gì xảy ra" — luôn giữ khớp với app.
+const IDM_EXPECTED_APP_VERSION = '1.2.0';
+
 const browserJobs = new Map();
 const browserSelections = new Map();
+// D-F7: persist tối thiểu browserJobs vào chrome.storage.session để sống sót
+// qua SW suspend/wake; resume phiên needs_confirmation, reject phiên dở dang.
+// Mọi truy cập storage.session đều bọc try — thiếu API thì fallback RAM.
+const BROWSER_JOBS_KEY = 'idm_browser_jobs';
+function persistBrowserJobs() {
+  try {
+    if (!chrome.storage || !chrome.storage.session || typeof chrome.storage.session.set !== 'function') return;
+    const minimal = [...browserJobs.values()].map(job => ({
+      sessionId: job.sessionId, taskId: job.taskId, token: job.token,
+      tabId: job.tabId, frameId: job.frameId, handle: job.handle, source: job.source,
+      filename: job.filename, mediaKind: job.mediaKind, expectedDuration: job.expectedDuration,
+      requiresConfirmation: !!job.requiresConfirmation, phase: job.phase, message: job.message,
+      verification: job.verification, downloadId: job.downloadId,
+      intents: Array.isArray(job.intents) ? job.intents : [],
+      existing: job.existing ? [...job.existing] : []
+    }));
+    chrome.storage.session.set({ [BROWSER_JOBS_KEY]: minimal }, () => {
+      try { void chrome.runtime.lastError; } catch (_) {}
+    });
+  } catch (_) { /* fallback RAM: Map vẫn giữ jobs trong phiên SW hiện tại */ }
+}
+function armBrowserHeartbeat(job) {
+  try { if (job.heartbeat) clearInterval(job.heartbeat); } catch (_) {}
+  job.heartbeat = setInterval(async () => {
+    if (!browserJobs.has(job.sessionId)) return;
+    try {
+      await jobCommand(job, 'browser_poll');
+      // Save As may block page JavaScript. Keep the app capability alive while
+      // a single selection check waits; navigation/tab-close events still cancel.
+      if (!job.checking) {
+        job.checking = true;
+        checkBrowserSelection(job).catch(error => { if (browserJobs.has(job.sessionId)) failBrowserJob(job, error); })
+          .finally(() => { job.checking = false; });
+      }
+    } catch (error) {
+      if (error.code === 'invalid_transfer' && job.phase === 'importing') return;
+      if (browserJobs.has(job.sessionId) && job.phase !== 'completed') await failBrowserJob(job, error);
+    }
+  }, 2000);
+}
+function resumeBrowserJobs(saved) {
+  for (const entry of saved) {
+    try {
+      if (!entry || !entry.sessionId) continue;
+      if (entry.phase === 'completed' || entry.phase === 'failed') continue;
+      const job = { ...entry, observed: new Map(), existing: new Set(entry.existing || []), checking: false };
+      if (entry.phase === 'needs_confirmation') {
+        // Resume: giữ phiên chờ user xác nhận file, dựng lại heartbeat.
+        browserJobs.set(job.sessionId, job);
+        armBrowserHeartbeat(job);
+        browserPhase(job, 'needs_confirmation', job.message || 'Chọn đúng file Chrome đã hoàn tất trong extension');
+      } else {
+        // Reject: phiên dở dang (saving_browser/importing/...) không thể tiếp
+        // tục an toàn sau wake — báo failed để user bấm lại.
+        browserJobs.set(job.sessionId, job);
+        failBrowserJob(job, Object.assign(Error('Phiên tải bị gián đoạn khi extension khởi động lại. Chọn lại mục.'), { code: 'browser_reconnect' }));
+      }
+    } catch (_) {}
+  }
+  persistBrowserJobs();
+}
+try {
+  if (chrome.storage && chrome.storage.session && typeof chrome.storage.session.get === 'function') {
+    chrome.storage.session.get([BROWSER_JOBS_KEY], (res) => {
+      try {
+        try { void chrome.runtime.lastError; } catch (_) {}
+        const saved = res && res[BROWSER_JOBS_KEY];
+        if (Array.isArray(saved) && saved.length) resumeBrowserJobs(saved);
+      } catch (_) {}
+    });
+  }
+} catch (_) {}
 let browserPort;
 let nativeIdleTimer;
 function closeIdleNative() {
@@ -43,6 +123,7 @@ function browserPhase(job, phase, message, verification) {
   job.phase = phase; job.message = message; job.verification = verification || job.verification || 'NOT VERIFIED';
   chrome.runtime.sendMessage({action: 'browser_status_changed', sessionId: job.sessionId, phase, message, verification: job.verification}).catch(() => {});
   chrome.tabs.sendMessage(job.tabId, {action: 'browser_phase', handle: job.handle, phase, message, verification: job.verification}, {frameId: job.frameId}).catch(() => {});
+  persistBrowserJobs();
 }
 async function checkBrowserSelection(job) {
   const [result] = await chrome.scripting.executeScript({target: {tabId: job.tabId, frameIds: [job.frameId]},
@@ -51,10 +132,19 @@ async function checkBrowserSelection(job) {
 }
 // This function runs synchronously in MAIN only around the selected native Save.
 // Async URL generation has no automatic selection proof.
+// D-F5: mirror spinner-check của telegram isSave — nút đang loading
+// (ProgressSpinner/progress-spinner/role=progressbar) không phải Save sẵn sàng.
+function isSaveControlBusy(save) {
+  try {
+    if (!save || typeof save.querySelector !== 'function') return false;
+    return !!save.querySelector('.ProgressSpinner,.progress-spinner,[role="progressbar"]');
+  } catch (_) { return false; }
+}
 function triggerBrowserSave(handle, source) {
   const selected = document.querySelector(`[data-idm-selected="${handle}"]`);
   const save = document.querySelector(`[data-idm-save="${handle}"]`);
   if (!selected || (selected.currentSrc || selected.src || selected.href || '') !== source || !save || save.disabled || save.getAttribute?.('aria-disabled') === 'true') return {error: 'source_changed'};
+  if (isSaveControlBusy(save)) return {error: 'website_save_not_ready'};
   const intents = []; const add = value => { try { intents.push(new URL(value, location.href).href); } catch {} };
   const oldClick = HTMLAnchorElement.prototype.click, oldOpen = window.open;
   const descriptor = Object.getOwnPropertyDescriptor(HTMLIFrameElement.prototype, 'src');
@@ -87,42 +177,27 @@ async function importBrowserFile(job, item, confirmed = false) {
     selectionProof: confirmed ? 'user_confirmed_file' : 'native_action_exact_url'}, 0);
   if (response.extra?.status !== 'completed') throw Error('App chưa xác nhận hoàn tất');
   browserPhase(job, 'completed', 'Hoàn tất', response.extra.verification);
-  clearInterval(job.heartbeat); browserJobs.delete(job.sessionId); closeIdleNative();
+  clearInterval(job.heartbeat); browserJobs.delete(job.sessionId); persistBrowserJobs(); closeIdleNative();
 }
 async function failBrowserJob(job, error) {
   if (!browserJobs.has(job.sessionId) || job.ending) return;
   job.ending = true;
   clearInterval(job.heartbeat);
   await jobCommand(job, 'browser_failure', {errorCode: error.code || 'browser_transfer_failed'}).catch(() => {});
-  browserPhase(job, 'failed', error.message || String(error)); browserJobs.delete(job.sessionId); closeIdleNative();
+  browserPhase(job, 'failed', error.message || String(error)); browserJobs.delete(job.sessionId); persistBrowserJobs(); closeIdleNative();
 }
 async function startBrowserJob(message, sender) {
   if (!sender.tab || !Number.isInteger(sender.frameId) || !/^[a-f0-9-]{36}$/.test(message.selection?.handle || '')) throw Error('Lựa chọn không hợp lệ');
   const job = {...message.selection, tabId: sender.tab.id, frameId: sender.frameId, sessionId: crypto.randomUUID(), phase: 'discovering', observed: new Map()};
   await checkBrowserSelection(job);
   const hello = await browserNative({action: 'hello'});
-  if (hello.extra?.appVersion !== '1.1.0' || hello.extra?.protocolVersion !== '2') throw Error('Cần cập nhật app và extension cùng phiên bản');
+  if (hello.extra?.appVersion !== IDM_EXPECTED_APP_VERSION || hello.extra?.protocolVersion !== '2') throw Error('Cần cập nhật app và extension cùng phiên bản');
   const created = await browserNative({action: 'browser_create', browser: {sessionId: job.sessionId, mediaKind: job.mediaKind,
     filename: job.filename, expectedDuration: job.expectedDuration}});
   if (!created.taskId || !created.extra?.token) throw Error('App chưa trả taskId/token');
   job.taskId = created.taskId; job.token = created.extra.token; browserJobs.set(job.sessionId, job);
   browserPhase(job, 'accepted', 'App đã nhận tác vụ');
-  job.heartbeat = setInterval(async () => {
-    if (!browserJobs.has(job.sessionId)) return;
-    try {
-      await jobCommand(job, 'browser_poll');
-      // Save As may block page JavaScript. Keep the app capability alive while
-      // a single selection check waits; navigation/tab-close events still cancel.
-      if (!job.checking) {
-        job.checking = true;
-        checkBrowserSelection(job).catch(error => { if (browserJobs.has(job.sessionId)) failBrowserJob(job, error); })
-          .finally(() => { job.checking = false; });
-      }
-    } catch (error) {
-      if (error.code === 'invalid_transfer' && job.phase === 'importing') return;
-      if (browserJobs.has(job.sessionId) && job.phase !== 'completed') await failBrowserJob(job, error);
-    }
-  }, 2000);
+  armBrowserHeartbeat(job);
   // Return acceptance immediately; subsequent phases arrive through content messages.
   runBrowserSave(job).catch(error => failBrowserJob(job, error));
   return {success: true, taskId: job.taskId, sessionId: job.sessionId};
@@ -202,7 +277,8 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
     if (!entry) throw Error('Lựa chọn đã mất. Quét lại tab.');
     return await startBrowserJob({selection: entry.selection}, {tab: entry.tab, frameId: entry.frameId});
   })();
-  if (message.action === 'browser_jobs') work = Promise.resolve({success: true, jobs: [...browserJobs.values()].map(x => ({sessionId: x.sessionId, phase: x.phase, message: x.message}))});
+  // D-F11: kèm intents + requiresConfirmation để popup lọc dropdown theo nguồn đã bấm.
+  if (message.action === 'browser_jobs') work = Promise.resolve({success: true, jobs: [...browserJobs.values()].map(x => ({sessionId: x.sessionId, phase: x.phase, message: x.message, requiresConfirmation: !!x.requiresConfirmation, intents: Array.isArray(x.intents) ? x.intents : []}))});
   if (message.action === 'browser_confirm_file' && !sender.tab) work = (async () => {
     const job = browserJobs.get(message.sessionId);
     if (!job || job.phase !== 'needs_confirmation') throw Error('Phiên xác nhận đã mất');

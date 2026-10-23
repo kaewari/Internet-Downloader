@@ -1,5 +1,5 @@
 #!/bin/bash
-set -e
+set -euo pipefail
 
 DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )/.." && pwd )"
 cd "$DIR"
@@ -8,8 +8,49 @@ echo "=========================================================="
 echo "  Building Internet Downloader.app & Chromium Extension   "
 echo "=========================================================="
 
-DIST_DIR="${IDM_BUILD_DIR:-$DIR/.runtime/release-staging/$(date +%Y%m%d-%H%M%S)}"
 APP_NAME="Internet Downloader.app"
+VERSION_FILE="$DIR/VERSION"
+APPVERSION_SWIFT="$DIR/Sources/DownloaderCore/AppVersion.swift"
+EXTENSION_MANIFEST="$DIR/Extension/manifest.json"
+
+die() { echo "ERROR: $*" >&2; exit 1; }
+
+# Read `public static let <name> = "<value>"` from AppVersion.swift.
+swift_string_literal() {
+    local file="$1" name="$2"
+    [ -f "$file" ] || return 0
+    sed -n -E "s/.*static let ${name}[[:space:]]*=[[:space:]]*\"([^\"]*)\".*/\1/p" "$file" | head -n 1
+}
+
+json_top_level_string() {
+    local file="$1" key="$2"
+    [ -f "$file" ] || return 0
+    python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))[sys.argv[2]])' "$file" "$key" 2>/dev/null || true
+}
+
+# --- 0. Version gate: VERSION and AppVersion.swift must agree before building ---
+[ -f "$VERSION_FILE" ] || die "Missing repo-root VERSION file (single source of the app version)."
+APP_VERSION="$(tr -d '[:space:]' < "$VERSION_FILE")"
+[ -n "$APP_VERSION" ] || die "VERSION is empty; expected a value such as 1.2.0."
+case "$APP_VERSION" in
+    [0-9]*.[0-9]*.[0-9]*) ;;
+    *) die "VERSION '$APP_VERSION' is not MAJOR.MINOR.PATCH." ;;
+esac
+
+[ -f "$APPVERSION_SWIFT" ] || die "Missing $APPVERSION_SWIFT (AppVersion is the single source for app/extension versions)."
+SWIFT_APP_VERSION="$(swift_string_literal "$APPVERSION_SWIFT" appVersion)"
+SWIFT_EXTENSION_VERSION="$(swift_string_literal "$APPVERSION_SWIFT" extensionVersion)"
+[ -n "$SWIFT_APP_VERSION" ] || die "Cannot read AppVersion.appVersion from $APPVERSION_SWIFT."
+[ -n "$SWIFT_EXTENSION_VERSION" ] || die "Cannot read AppVersion.extensionVersion from $APPVERSION_SWIFT."
+[ "$APP_VERSION" = "$SWIFT_APP_VERSION" ] || die "VERSION ($APP_VERSION) != AppVersion.appVersion ($SWIFT_APP_VERSION); update both or run scripts/check_versions.sh."
+
+MANIFEST_VERSION="$(json_top_level_string "$EXTENSION_MANIFEST" version)"
+[ -n "$MANIFEST_VERSION" ] || die "Cannot read version from $EXTENSION_MANIFEST."
+[ "$MANIFEST_VERSION" = "$SWIFT_EXTENSION_VERSION" ] || die "Extension/manifest.json version ($MANIFEST_VERSION) != AppVersion.extensionVersion ($SWIFT_EXTENSION_VERSION); update both or run scripts/check_versions.sh."
+
+echo "==> Versions: app $APP_VERSION (VERSION = AppVersion.appVersion), extension $MANIFEST_VERSION (manifest = AppVersion.extensionVersion)"
+
+DIST_DIR="${IDM_BUILD_DIR:-$DIR/.runtime/release-staging/$(date +%Y%m%d-%H%M%S)}"
 APP_DIR="$DIST_DIR/$APP_NAME"
 
 if [ -e "$DIST_DIR" ]; then echo "Staging already exists: $DIST_DIR"; exit 1; fi
@@ -118,7 +159,7 @@ cat <<EOF > "$CONTENTS_DIR/Info.plist"
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
-    <string>1.1.0</string>
+    <string>${APP_VERSION}</string>
     <key>CFBundleVersion</key>
     <string>1</string>
     <key>LSMinimumSystemVersion</key>
@@ -148,9 +189,15 @@ cd "$DIR"
 echo "==> 7. Verify staged bundle; installation is a separate idle-only step."
 codesign --verify --deep --strict "$APP_DIR"
 plutil -lint "$CONTENTS_DIR/Info.plist"
+STAGED_VERSION="$(plutil -extract CFBundleShortVersionString raw -o - "$CONTENTS_DIR/Info.plist")"
+[ "$STAGED_VERSION" = "$APP_VERSION" ] || { echo "ERROR: staged CFBundleShortVersionString ($STAGED_VERSION) != VERSION ($APP_VERSION)"; exit 1; }
+STAGED_EXT_VERSION="$(json_top_level_string "$EXT_DIST_DIR/manifest.json" version)"
+[ "$STAGED_EXT_VERSION" = "$MANIFEST_VERSION" ] || { echo "ERROR: staged Extension manifest version ($STAGED_EXT_VERSION) != $MANIFEST_VERSION"; exit 1; }
 echo "=========================================================="
 echo "  BUILD & PACKAGING THÀNH CÔNG RỰC RỠ!"
+echo "  - App version: $APP_VERSION  |  Extension version: $MANIFEST_VERSION"
 echo "  - macOS App: $APP_DIR"
 echo "  - Extension folder: $EXT_DIST_DIR"
 echo "  - Extension package: $DIST_DIR/Internet-Downloader-Extension.zip"
+echo "  - Next: quit the app, then python3 scripts/install_release.py --stage \"$DIST_DIR\""
 echo "=========================================================="

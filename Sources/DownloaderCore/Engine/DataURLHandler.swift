@@ -7,6 +7,11 @@ public struct DataURLResult: Sendable {
 }
 
 public struct DataURLHandler: Sendable {
+    /// Trần data: URL (A-F19) — toàn bộ payload nằm trong RAM nên URL lớn hơn
+    /// sẽ OOM process. Vượt trần → throw rõ, caller (DownloadManager) báo lỗi
+    /// thay vì tải.
+    public static let maxDataURLBytes = 64 * 1024 * 1024
+
     public static func isDataURL(_ url: URL) -> Bool {
         url.scheme?.lowercased() == "data" || url.absoluteString.hasPrefix("data:")
     }
@@ -23,6 +28,13 @@ public struct DataURLHandler: Sendable {
 
         let metadata = String(withoutScheme[..<commaIndex])
         let payload = String(withoutScheme[withoutScheme.index(after: commaIndex)...])
+
+        // Chặn sớm bằng độ dài payload (base64 ≈ 4/3 dữ liệu) để không cấp
+        // phát hàng trăm MB RAM trước khi decode.
+        let estimatedBytes = payload.count * 3 / 4
+        if estimatedBytes > maxDataURLBytes {
+            throw dataTooLargeError(actual: estimatedBytes)
+        }
 
         let isBase64 = metadata.contains(";base64")
         let mimeType: String
@@ -48,7 +60,18 @@ public struct DataURLHandler: Sendable {
         }
 
         let ext = extensionForMimeType(mimeType)
+        guard data.count <= maxDataURLBytes else {
+            throw dataTooLargeError(actual: data.count)
+        }
         return DataURLResult(data: data, mimeType: mimeType, suggestedExtension: ext)
+    }
+
+    private static func dataTooLargeError(actual: Int) -> Error {
+        NSError(
+            domain: "DataURLHandler",
+            code: 413,
+            userInfo: [NSLocalizedDescriptionKey: "Data URL quá lớn (\(actual) byte, giới hạn \(maxDataURLBytes / 1024 / 1024)MB) — toàn bộ payload nằm trong RAM, dùng liên kết HTTP(S) thay vì data: URL."]
+        )
     }
 
     public static func extensionForMimeType(_ mime: String) -> String {

@@ -4,6 +4,45 @@ import CommonCrypto
 
 final class HLSAdvancedAndParityTests: XCTestCase {
 
+    // Resolve ffmpeg/ffprobe: ENV (FFMPEG/FFPROBE) → /opt/homebrew → /usr/local → which. Nil khi thiếu.
+    private func find_ffmpeg() -> String? {
+        let env = ProcessInfo.processInfo.environment
+        if let override = env["FFMPEG"], FileManager.default.isExecutableFile(atPath: override) { return override }
+        for candidate in ["/opt/homebrew/bin/ffmpeg", "/usr/local/bin/ffmpeg", "/usr/bin/ffmpeg"] {
+            if FileManager.default.isExecutableFile(atPath: candidate) { return candidate }
+        }
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: "/usr/bin/which")
+        proc.arguments = ["ffmpeg"]
+        let pipe = Pipe()
+        proc.standardOutput = pipe
+        proc.standardError = FileHandle.nullDevice
+        try? proc.run()
+        proc.waitUntilExit()
+        let found = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return found.isEmpty ? nil : found
+    }
+
+    private func find_ffprobe() -> String? {
+        let env = ProcessInfo.processInfo.environment
+        if let override = env["FFPROBE"], FileManager.default.isExecutableFile(atPath: override) { return override }
+        for candidate in ["/opt/homebrew/bin/ffprobe", "/usr/local/bin/ffprobe", "/usr/bin/ffprobe"] {
+            if FileManager.default.isExecutableFile(atPath: candidate) { return candidate }
+        }
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: "/usr/bin/which")
+        proc.arguments = ["ffprobe"]
+        let pipe = Pipe()
+        proc.standardOutput = pipe
+        proc.standardError = FileHandle.nullDevice
+        try? proc.run()
+        proc.waitUntilExit()
+        let found = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return found.isEmpty ? nil : found
+    }
+
     // 1. Test #EXT-X-BYTERANGE parsing (explicit and implicit offset)
     func testHLSByteRangeParsingAndOffsets() throws {
         let m3u8 = """
@@ -477,8 +516,11 @@ final class HLSAdvancedAndParityTests: XCTestCase {
         XCTAssertGreaterThan(destSize, 1024, "Destination MP4 must be populated with remuxed data")
 
         // Validate using ffprobe to confirm that the file is playable and contains video/audio streams
+        guard let ffprobe = find_ffprobe() else {
+            throw XCTSkip("ffprobe không khả dụng (FFPROBE → /opt/homebrew → /usr/local → which)")
+        }
         let probeProc = Process()
-        probeProc.executableURL = URL(fileURLWithPath: "/opt/homebrew/bin/ffprobe")
+        probeProc.executableURL = URL(fileURLWithPath: ffprobe)
         probeProc.arguments = [
             "-v", "error",
             "-show_entries", "format=format_name,duration:stream=codec_type,codec_name",
@@ -511,6 +553,19 @@ final class HLSAdvancedAndParityTests: XCTestCase {
 
         let fbURLString = "https://scontent.fhnd4-1.fna.fbcdn.net/v/t15.5256-10/759010571_1816855926027707_8177865488497857662_n.jpg?_nc_cat=108&_nc_map=urlgen_bucketless&ccb=1-7&_nc_sid=b07905&_nc_ohc=Z43ly1eD3LQQ7kNvwFSbRnE&_nc_oc=AdqG0WNeJTM7wP2OHgT886htU29w_k8fJqWz8n5jHRx8huYPjP1nIptCR8bCVJ6WuVpCNZN9HxdbprFszavwAHbE&_nc_zt=23&_nc_ht=scontent.fhnd4-1.fna&_nc_gid=sk_5MAP7QPeGgbTZHQO7Cg&_nc_ss=7020f&oh=00_AQNWOfJ7NPx0KD4IZ5HH0tUAvlaw6O3_xf4cikflBW8YmQ&oe=6AD2BD6D"
         guard let fbURL = URL(string: fbURLString) else { return }
+
+        // Preflight: this photo URL carries a time-limited CDN signature (`oe=`) and expires,
+        // which would make the test flaky. Skip when it is no longer valid instead of failing.
+        var preflight = URLRequest(url: fbURL)
+        preflight.timeoutInterval = 10
+        preflight.setValue("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36", forHTTPHeaderField: "User-Agent")
+        preflight.setValue("https://www.facebook.com/", forHTTPHeaderField: "Referer")
+        preflight.setValue("bytes=0-15", forHTTPHeaderField: "Range")
+        let (_, preflightResponse) = try await URLSession.shared.data(for: preflight)
+        let preflightStatus = (preflightResponse as? HTTPURLResponse)?.statusCode ?? 0
+        guard (200...299).contains(preflightStatus) else {
+            throw XCTSkip("Facebook CDN signature URL has expired (HTTP \(preflightStatus)); refresh the URL to re-enable this test.")
+        }
 
         let destFolder = FileManager.default.temporaryDirectory.appendingPathComponent("fb_download_\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: destFolder, withIntermediateDirectories: true)
@@ -547,11 +602,6 @@ final class HLSAdvancedAndParityTests: XCTestCase {
         // Validate magic bytes
         let fileData = try Data(contentsOf: targetFile)
         XCTAssertTrue(fileData.starts(with: [0xff, 0xd8, 0xff]), "File must be valid JPEG image starting with FFD8FF")
-
-        // Save a copy to project's Downloads folder
-        let persistentDest = URL(fileURLWithPath: "/Users/hoangson/Projects/Internet-Downloader/Downloads/facebook_photo.jpg")
-        try? FileManager.default.removeItem(at: persistentDest)
-        try? FileManager.default.copyItem(at: targetFile, to: persistentDest)
     }
 }
 

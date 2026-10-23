@@ -36,7 +36,7 @@ public struct DownloadConfirmationDialog: View {
     public var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             HStack(spacing: 12) {
-                Image(systemName: fileIconName(for: filename))
+                Image(systemName: FileTypeHelper.iconName(for: filename))
                     .font(.system(size: 32))
                     .foregroundColor(.accentColor)
                 VStack(alignment: .leading, spacing: 2) {
@@ -83,7 +83,7 @@ public struct DownloadConfirmationDialog: View {
                             .font(.system(size: 11))
                             .foregroundColor(.secondary)
                     } else if totalBytes > 0 {
-                        Text(ByteCountFormatter.string(fromByteCount: totalBytes, countStyle: .file))
+                        Text(FileTypeHelper.formatBytes(totalBytes))
                             .font(.system(size: 13, weight: .semibold))
                             .foregroundColor(.accentColor)
                     } else {
@@ -149,13 +149,8 @@ public struct DownloadConfirmationDialog: View {
         }
         .padding(20)
         .frame(width: 500)
-        .onChange(of: task.filename) { newName in
-            let currentExt = (filename as NSString).pathExtension
-            let isOpaqueOrEmpty = filename.isEmpty || filename == "download" || FileTypeDetector.isOpaqueIdentifier(filename) || currentExt.isEmpty
-            if isOpaqueOrEmpty && !newName.isEmpty && newName != "download" && !FileTypeDetector.isOpaqueIdentifier(newName) {
-                filename = newName
-            }
-        }
+        // NOTE (C-F18): onChange(task.filename) cũ đã bỏ — `task` là let, không bao
+        // giờ đổi sau init nên handler đó là dead-code (không bao giờ fire).
         .task {
             isProbingSize = true
             let currentExt = (filename as NSString).pathExtension
@@ -167,6 +162,8 @@ public struct DownloadConfirmationDialog: View {
                 cookies: task.cookies,
                 userAgent: task.userAgent
             ) {
+                // Sheet có thể đã đóng trong lúc probe → dừng ngay (C-F17).
+                guard !Task.isCancelled else { return }
                 if probe.totalBytes > 0 {
                     self.totalBytes = probe.totalBytes
                 }
@@ -177,11 +174,19 @@ public struct DownloadConfirmationDialog: View {
                     }
                 }
             } else if totalBytes <= 0 {
+                guard !Task.isCancelled else {
+                    isProbingSize = false
+                    return
+                }
                 let (probedSize, probedTitle) = await MediaURLResolver.probeMediaSizeAndTitle(
                     url: task.url,
                     userAgent: task.userAgent,
                     cookies: task.cookies
                 )
+                guard !Task.isCancelled else {
+                    isProbingSize = false
+                    return
+                }
                 if probedSize > 0 {
                     self.totalBytes = probedSize
                 }
@@ -189,13 +194,25 @@ public struct DownloadConfirmationDialog: View {
                     let clean = probedTitle.trimmingCharacters(in: .whitespacesAndNewlines)
                     let current = filename.lowercased()
                     if current.isEmpty || current.hasPrefix("download") || current.contains("manifest") || current.hasSuffix(".bin") || FileTypeDetector.isOpaqueIdentifier(current) {
-                        let ext = task.url.pathExtension.isEmpty ? "mp4" : task.url.pathExtension
+                        let ext = Self.fallbackExtension(taskURL: task.url, currentFilename: filename)
                         self.filename = "\(clean).\(ext)"
                     }
                 }
             }
             isProbingSize = false
         }
+    }
+
+    /// Ưu tiên ext từ tên đã probe/URL; chỉ dùng "mp4" khi không suy ra được gì (C-F17).
+    private static func fallbackExtension(taskURL: URL, currentFilename: String) -> String {
+        let fromCurrent = (currentFilename as NSString).pathExtension
+        if !fromCurrent.isEmpty { return fromCurrent }
+        if !taskURL.pathExtension.isEmpty { return taskURL.pathExtension }
+        if let extracted = FileTypeDetector.extractFilename(from: taskURL),
+           !(extracted as NSString).pathExtension.isEmpty {
+            return (extracted as NSString).pathExtension
+        }
+        return "mp4"
     }
 
     private func selectDestinationFolder() {
@@ -209,19 +226,6 @@ public struct DownloadConfirmationDialog: View {
 
         if panel.runModal() == .OK, let selectedURL = panel.url {
             self.destinationFolder = selectedURL
-        }
-    }
-
-    private func fileIconName(for filename: String) -> String {
-        let ext = URL(fileURLWithPath: filename).pathExtension.lowercased()
-        switch ext {
-        case "mp4", "mkv", "mov", "avi", "webm", "ts", "m3u8": return "film"
-        case "mp3", "m4a", "flac", "wav", "aac": return "music.note"
-        case "zip", "rar", "7z", "tar", "gz": return "doc.zipper"
-        case "dmg", "pkg", "iso", "app": return "shippingbox"
-        case "pdf": return "doc.richtext"
-        case "jpg", "jpeg", "png", "webp", "gif": return "photo"
-        default: return "arrow.down.doc"
         }
     }
 }

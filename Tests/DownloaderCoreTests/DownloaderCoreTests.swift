@@ -367,7 +367,11 @@ final class DownloaderCoreTests: XCTestCase {
         defer { try? FileManager.default.removeItem(atPath: tempDB) }
 
         let manager = DownloadManager(dbPath: tempDB)
-        let tempDest = FileManager.default.temporaryDirectory
+        // Đích download riêng biệt từng run: collision "(N)" là hành vi đúng,
+        // không để file test trước trong /tmp làm test fragen.
+        let tempDest = FileManager.default.temporaryDirectory.appendingPathComponent("idm_cb_\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tempDest, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDest) }
 
         let startedExpectation = expectation(description: "Download started callback fired")
         let completedExpectation = expectation(description: "Download completed callback fired")

@@ -47,7 +47,7 @@ test('missing taskId/token and incompatible app version reject the widget reques
     const {c}=environment(); let receive;
     c.chrome.scripting={executeScript:async()=>[{result:true}]};
     c.chrome.runtime.connectNative=()=>({onMessage:{addListener(f){receive=f;}},onDisconnect:{addListener(){}},postMessage(payload){
-      const extra=payload.action==='hello'?{appVersion:mode==='old'?'1.0.0':'1.1.0',protocolVersion:'2'}:{};
+      const extra=payload.action==='hello'?{appVersion:mode==='old'?'1.1.0':'1.2.0',protocolVersion:'2'}:{};
       receive({requestId:payload.requestId,success:true,extra});
     }});
     await assert.rejects(c.startBrowserJob({selection:{handle:crypto.randomUUID(),mediaKind:'video'}},{tab:{id:7},frameId:0}), mode==='old'?/cùng phiên bản/:/taskId\/token/);
@@ -65,7 +65,7 @@ test('HTTP toast waits for actual app acceptance with taskId',()=>{
 });
 test('no debugger permission; version and existing extension identity preserved',()=>{
   const manifest=JSON.parse(fs.readFileSync('Extension/manifest.json','utf8'));
-  assert.equal(manifest.version,'1.3.0'); assert(!manifest.permissions.includes('debugger'));
+  assert.equal(manifest.version,'1.4.0'); assert(!manifest.permissions.includes('debugger'));
   const digest=crypto.createHash('sha256').update(Buffer.from(manifest.key,'base64')).digest('hex').slice(0,32);
   const id=digest.split('').map(x=>String.fromCharCode(97+parseInt(x,16))).join('');
   assert.equal(id,'nljinpcahdihnlhidjdacnhlchlpblnk');
@@ -120,12 +120,10 @@ test('restriction applies to the selected viewer, not an unrelated descendant',(
   assert.equal(page.api.check(picked.handle),false);
   assert.throws(()=>page.api.prepare(page.video),/website_save_unavailable/);
 });
-test('Telegram Save button in a restricted-forwarding chat is allowed when native Save is available',()=>{
+test('Telegram Save button in a restricted-forwarding chat is blocked even when native Save exists (D-F3)',()=>{
   const page=pageEnvironment();
   page.scope.closest=s=>s==='.no-forwards'?page.scope:null;
-  const picked=page.api.prepare(page.video);
-  assert.equal(picked.mediaKind,'video');
-  assert(page.api.check(picked.handle));
+  assert.throws(()=>page.api.prepare(page.video),/website_save_unavailable/);
 });
 test('own Save progress is allowed, but selected media changes remain invalid',()=>{
   const page=pageEnvironment(); const picked=page.api.prepare(page.video); assert(page.api.markSaving(picked.handle));
@@ -597,7 +595,8 @@ test('isVideoPlatform correctly identifies YouTube and click handler prioritizes
     setStatus: () => {}
   });
 
-  const isVideoPlatformCode = source.slice(source.indexOf('function isVideoPlatform('), source.indexOf('function getBestStreamFromRecent('));
+  // Cắt từ `hostMatches` để có đủ helper + danh sách nền tảng dùng chung.
+  const isVideoPlatformCode = source.slice(source.indexOf('function hostMatches('), source.indexOf('function getBestStreamFromRecent('));
   vm.runInContext(isVideoPlatformCode, c);
   assert.equal(c.isVideoPlatform(), true, 'YouTube must be identified as video platform');
 
@@ -1307,4 +1306,290 @@ test('Bugfix Facebook/YouTube feed: isVideoWatchPage distinguishes watch pages f
   barListeners.click(fakeEvent);
   assert.equal(sentMessages.length, 1);
   assert.equal(sentMessages[0].url, 'https://video.xx.fbcdn.net/v/t39.2548-2/123.mp4');
+});
+
+test('failed native handoff triggers restartDownloadInBrowser and error notification', () => {
+  const source = fs.readFileSync('Extension/background.js', 'utf8');
+  let onCreatedHandler = null;
+  const restartedDownloads = [];
+  const createdNotifications = [];
+
+  const c = vm.createContext({
+    importScripts: () => {},
+    browserJobs: new Map(),
+    URL,
+    navigator: { userAgent: 'Mozilla/5.0' },
+    setTimeout: (fn) => fn(),
+    clearTimeout: () => {},
+    chrome: {
+      runtime: {
+        onInstalled: { addListener: () => {} },
+        onMessage: { addListener: () => {} },
+        sendNativeMessage: (host, payload, cb) => {
+          // Simulate native host failure (e.g. app closed or rejected)
+          if (cb) cb({ success: false, message: 'App chưa nhận tác vụ' });
+        }
+      },
+      storage: {
+        local: { get: () => {} },
+        session: { get: () => {}, set: () => {} },
+        onChanged: { addListener: () => {} }
+      },
+      contextMenus: { create: () => {}, onClicked: { addListener: () => {} } },
+      downloads: {
+        onCreated: { addListener: (fn) => { onCreatedHandler = fn; } },
+        onDeterminingFilename: { addListener: () => {} },
+        onChanged: { addListener: () => {} },
+        cancel: (id, cb) => { if (cb) cb(); },
+        erase: (q, cb) => { if (cb) cb(); },
+        download: (opts, cb) => { restartedDownloads.push(opts); if (cb) cb(99); }
+      },
+      notifications: {
+        create: (opts, cb) => { createdNotifications.push(opts); if (cb) cb('notif-1'); }
+      },
+      webRequest: { onBeforeSendHeaders: { addListener: () => {} }, onBeforeRedirect: { addListener: () => {} }, onResponseStarted: { addListener: () => {} } },
+      tabs: { onRemoved: { addListener: () => {} }, onUpdated: { addListener: () => {} }, sendMessage: () => Promise.resolve() },
+      webNavigation: { onHistoryStateUpdated: { addListener: () => {} } },
+      action: { setBadgeText: () => {}, setBadgeBackgroundColor: () => {} }
+    }
+  });
+
+  vm.runInContext(source, c);
+  assert(typeof onCreatedHandler === 'function');
+
+  onCreatedHandler({
+    id: 101,
+    url: 'https://example.com/files/report.pdf',
+    finalUrl: 'https://cdn.example.com/files/report.pdf',
+    filename: 'report.pdf',
+    referrer: 'https://example.com/'
+  });
+
+  assert.equal(restartedDownloads.length, 1, 'Must restart download in Chrome if host rejects or is closed');
+  assert.equal(restartedDownloads[0].url, 'https://cdn.example.com/files/report.pdf');
+  assert.equal(createdNotifications.length, 1, 'Must notify user of handoff fallback');
+});
+
+test('recentHandedOffUrls only records on success so pending re-click is not swallowed', () => {
+  const source = fs.readFileSync('Extension/background.js', 'utf8');
+  let onCreatedHandler = null;
+  let nativeResponseCb = null;
+  let dispatchCount = 0;
+
+  const c = vm.createContext({
+    importScripts: () => {},
+    browserJobs: new Map(),
+    URL,
+    navigator: { userAgent: 'Mozilla/5.0' },
+    setTimeout: (fn) => fn(),
+    clearTimeout: () => {},
+    chrome: {
+      runtime: {
+        onInstalled: { addListener: () => {} },
+        onMessage: { addListener: () => {} },
+        sendNativeMessage: (host, payload, cb) => {
+          dispatchCount++;
+          nativeResponseCb = cb; // keep pending
+        }
+      },
+      storage: {
+        local: { get: () => {} },
+        session: { get: () => {}, set: () => {} },
+        onChanged: { addListener: () => {} }
+      },
+      contextMenus: { create: () => {}, onClicked: { addListener: () => {} } },
+      downloads: {
+        onCreated: { addListener: (fn) => { onCreatedHandler = fn; } },
+        onDeterminingFilename: { addListener: () => {} },
+        cancel: (id, cb) => { if (cb) cb(); },
+        erase: (q, cb) => { if (cb) cb(); },
+        download: () => {}
+      },
+      notifications: { create: () => {} },
+      webRequest: { onBeforeSendHeaders: { addListener: () => {} }, onBeforeRedirect: { addListener: () => {} }, onResponseStarted: { addListener: () => {} } },
+      tabs: { onRemoved: { addListener: () => {} }, onUpdated: { addListener: () => {} }, sendMessage: () => Promise.resolve() },
+      webNavigation: { onHistoryStateUpdated: { addListener: () => {} } },
+      action: { setBadgeText: () => {}, setBadgeBackgroundColor: () => {} }
+    }
+  });
+
+  vm.runInContext(source, c);
+  const item1 = { id: 201, url: 'https://example.com/data.zip', filename: 'data.zip' };
+  onCreatedHandler(item1);
+  assert.equal(dispatchCount, 1, 'First click dispatched');
+
+  // Second rapid click while native host call is still pending
+  const item2 = { id: 202, url: 'https://example.com/data.zip', filename: 'data.zip' };
+  onCreatedHandler(item2);
+  assert.equal(dispatchCount, 2, 'Pending handoff must NOT swallow re-click because dedup only records on success');
+
+  // Once native host succeeds, future rapid clicks are deduped
+  nativeResponseCb({ success: true, taskId: 'task-zip-1' });
+  const item3 = { id: 203, url: 'https://example.com/data.zip', filename: 'data.zip' };
+  onCreatedHandler(item3);
+  assert.equal(dispatchCount, 2, 'After success, identical URL within 3s window is deduped');
+});
+
+test('storage.session hydrates and persists background state across SW restarts', () => {
+  const source = fs.readFileSync('Extension/background.js', 'utf8');
+  let sessionStore = {
+    idm_sw_state: {
+      headers: { 'https://example.com/stream.m3u8': { Referer: 'https://example.com/watch' } },
+      redirects: { 'https://short.link/1': 'https://example.com/target' },
+      handoffs: { 'https://example.com/file.zip': { ts: Date.now(), filename: 'file.zip' } },
+      intercepted: [555]
+    }
+  };
+
+  const c = vm.createContext({
+    importScripts: () => {},
+    browserJobs: new Map(),
+    URL,
+    navigator: { userAgent: 'Mozilla/5.0' },
+    setTimeout: () => {},
+    clearTimeout: () => {},
+    chrome: {
+      runtime: { onInstalled: { addListener: () => {} }, onMessage: { addListener: () => {} } },
+      storage: {
+        local: { get: () => {} },
+        session: {
+          get: (keys, cb) => cb(sessionStore),
+          set: (obj) => { Object.assign(sessionStore, obj); }
+        },
+        onChanged: { addListener: () => {} }
+      },
+      contextMenus: { create: () => {}, onClicked: { addListener: () => {} } },
+      downloads: { onCreated: { addListener: () => {} }, onDeterminingFilename: { addListener: () => {} } },
+      webRequest: { onBeforeSendHeaders: { addListener: () => {} }, onBeforeRedirect: { addListener: () => {} }, onResponseStarted: { addListener: () => {} } },
+      tabs: { onRemoved: { addListener: () => {} }, onUpdated: { addListener: () => {} }, sendMessage: () => Promise.resolve() },
+      webNavigation: { onHistoryStateUpdated: { addListener: () => {} } },
+      action: { setBadgeText: () => {}, setBadgeBackgroundColor: () => {} }
+    }
+  });
+
+  vm.runInContext(source, c);
+  const state = vm.runInContext('({ capturedHeadersByUrl, capturedRedirectByUrl, recentHandedOffUrls, interceptedDownloadIds })', c);
+  assert.equal(state.capturedHeadersByUrl['https://example.com/stream.m3u8']?.Referer, 'https://example.com/watch');
+  assert.equal(state.capturedRedirectByUrl['https://short.link/1'], 'https://example.com/target');
+  assert.equal(state.recentHandedOffUrls.get('https://example.com/file.zip')?.filename, 'file.zip');
+  assert.equal(state.interceptedDownloadIds.has(555), true);
+});
+
+test('.ts regex only matches file extension at end of path, not in mid-URL directory or query', () => {
+  const source = fs.readFileSync('Extension/background.js', 'utf8');
+  let responseStartedHandler = null;
+
+  const c = vm.createContext({
+    importScripts: () => {},
+    browserJobs: new Map(),
+    URL,
+    navigator: { userAgent: 'Mozilla/5.0' },
+    setTimeout: () => {},
+    clearTimeout: () => {},
+    chrome: {
+      runtime: { onInstalled: { addListener: () => {} }, onMessage: { addListener: () => {} } },
+      storage: { local: { get: () => {} }, session: { get: () => {}, set: () => {} }, onChanged: { addListener: () => {} } },
+      contextMenus: { create: () => {}, onClicked: { addListener: () => {} } },
+      downloads: { onCreated: { addListener: () => {} }, onDeterminingFilename: { addListener: () => {} } },
+      webRequest: {
+        onBeforeSendHeaders: { addListener: () => {} },
+        onBeforeRedirect: { addListener: () => {} },
+        onResponseStarted: { addListener: (fn) => { responseStartedHandler = fn; } }
+      },
+      tabs: { onRemoved: { addListener: () => {} }, onUpdated: { addListener: () => {} }, sendMessage: () => Promise.resolve() },
+      webNavigation: { onHistoryStateUpdated: { addListener: () => {} } },
+      action: { setBadgeText: () => {}, setBadgeBackgroundColor: () => {} }
+    }
+  });
+
+  vm.runInContext(source, c);
+  assert(typeof responseStartedHandler === 'function');
+
+  // URL containing ".ts" in a folder name or TypeScript source asset
+  responseStartedHandler({
+    tabId: 10,
+    url: 'https://cdn.example.com/scripts.ts/bundle.js',
+    statusCode: 200,
+    responseHeaders: [{ name: 'Content-Type', value: 'application/javascript' }]
+  });
+  let media = vm.runInContext('capturedMediaByTab', c);
+  assert.equal(media[10]?.length || 0, 0, 'Must NOT capture .ts folder path as video stream');
+
+  // Real .ts video segment
+  responseStartedHandler({
+    tabId: 10,
+    url: 'https://cdn.example.com/hls/segment_001.ts?token=abc',
+    statusCode: 200,
+    responseHeaders: [{ name: 'Content-Type', value: 'video/mp2t' }]
+  });
+  media = vm.runInContext('capturedMediaByTab', c);
+  assert.equal(media[10]?.length, 1, 'Must capture real .ts video segment');
+});
+
+test('media without extension and unknown mime does not blind-append .mp4', () => {
+  const source = fs.readFileSync('Extension/background.js', 'utf8');
+  let responseStartedHandler = null;
+
+  const c = vm.createContext({
+    importScripts: () => {},
+    browserJobs: new Map(),
+    URL,
+    navigator: { userAgent: 'Mozilla/5.0' },
+    setTimeout: () => {},
+    clearTimeout: () => {},
+    chrome: {
+      runtime: { onInstalled: { addListener: () => {} }, onMessage: { addListener: () => {} } },
+      storage: { local: { get: () => {} }, session: { get: () => {}, set: () => {} }, onChanged: { addListener: () => {} } },
+      contextMenus: { create: () => {}, onClicked: { addListener: () => {} } },
+      downloads: { onCreated: { addListener: () => {} }, onDeterminingFilename: { addListener: () => {} } },
+      webRequest: {
+        onBeforeSendHeaders: { addListener: () => {} },
+        onBeforeRedirect: { addListener: () => {} },
+        onResponseStarted: { addListener: (fn) => { responseStartedHandler = fn; } }
+      },
+      tabs: { onRemoved: { addListener: () => {} }, onUpdated: { addListener: () => {} }, sendMessage: () => Promise.resolve() },
+      webNavigation: { onHistoryStateUpdated: { addListener: () => {} } },
+      action: { setBadgeText: () => {}, setBadgeBackgroundColor: () => {} }
+    }
+  });
+
+  vm.runInContext(source, c);
+  responseStartedHandler({
+    tabId: 20,
+    url: 'https://example.com/audio-stream-endpoint',
+    statusCode: 200,
+    responseHeaders: [{ name: 'Content-Type', value: 'audio/aac' }]
+  });
+  const media = vm.runInContext('capturedMediaByTab', c);
+  assert.equal(media[20]?.length, 1);
+  assert.equal(media[20][0].filename, 'audio-stream-endpoint.m4a', 'Audio stream must get audio extension (.m4a), not .mp4');
+});
+test('host matching uses exact/suffix so "x.com" does not match netflix.com, and /posts/ is a Facebook watch page', () => {
+  const source = fs.readFileSync('Extension/content.js', 'utf8');
+  const c = vm.createContext({ URL, console });
+  const code = source.slice(
+    source.indexOf('function hostMatches('),
+    source.indexOf('function findVideoPostPermalink(')
+  );
+  vm.runInContext(code, c);
+
+  // False positives cũ: "netflix.com".includes("x.com") === true → false positive
+  assert.equal(c.hostMatches('netflix.com', 'x.com'), false, 'netflix.com must NOT match x.com');
+  assert.equal(c.hostMatches('max.com', 'x.com'), false, 'max.com must NOT match x.com');
+  assert.equal(c.hostMatches('evilvimeo.com', 'vimeo.com'), false, 'evilvimeo.com must NOT match vimeo.com');
+  assert.equal(c.hostMatches('faketiktok.com', 'tiktok.com'), false, 'faketiktok.com must NOT match tiktok.com');
+
+  // Khớp đúng vẫn phải hoạt động
+  assert.equal(c.hostMatches('www.youtube.com', 'youtube.com'), true);
+  assert.equal(c.hostMatches('m.youtube.com', 'youtube.com'), true);
+  assert.equal(c.hostMatches('youtube.com', 'youtube.com'), true);
+  assert.equal(c.hostMatches('www.tiktok.com', 'tiktok.com'), true);
+
+  // isVideoWatchPage: /posts/ của Facebook là trang video (R1 yêu cầu)
+  assert.equal(c.isVideoWatchPage('https://www.facebook.com/hoangson/posts/1234567890'), true,
+    'Facebook /posts/ must be treated as a watch page');
+  assert.equal(c.isVideoWatchPage('https://netflix.com/watch/12345'), false,
+    'netflix.com must not be classified as a video watch page');
+  assert.equal(c.isVideoWatchPage('https://www.youtube.com/shorts/abc'), true);
+  assert.equal(c.isVideoWatchPage('https://x.com/user/status/123'), true);
 });

@@ -1,6 +1,6 @@
-# Internet Downloader 1.1.0 — tải qua Chrome
+# Internet Downloader 1.2.0 — tải qua Chrome
 
-Dùng Internet Downloader macOS hiện tại cùng extension Internet Downloader Integration Module 1.3.0. Native host/app bắt tay browser protocol 2. ID giữ nguyên: `nljinpcahdihnlhidjdacnhlchlpblnk`. Bản sửa này không thêm quyền debugger.
+Dùng Internet Downloader macOS 1.2.0 cùng extension Internet Downloader Integration Module 1.4.0. Native host/app bắt tay browser protocol 2. Popup hiển thị phiên bản app + extension và cảnh báo khi lệch bản (mọi nơi đọc từ `Sources/DownloaderCore/AppVersion.swift`, `VERSION` và `Extension/manifest.json`). ID giữ nguyên: `nljinpcahdihnlhidjdacnhlchlpblnk`. Bản sửa này không thêm quyền debugger.
 
 ## Dùng Telegram Web
 
@@ -24,13 +24,13 @@ idm_release_dir="$PWD/.runtime/releases/$(date +%Y%m%d-%H%M%S)"
 IDM_BUILD_DIR="$idm_release_dir" bash scripts/build_app.sh
 ```
 
-Build chỉ tạo staging, kiểm tra chữ ký và đóng gói extension; không xóa `dist`, không tự sửa native-host manifest. Sau khi không còn job pending/active/needs_confirmation, quit app và cài staging:
+Build chỉ tạo staging, kiểm tra chữ ký và đóng gói extension; không xóa `dist`. Trước khi build, `scripts/build_app.sh` fail-fast nếu `VERSION` ⇄ `AppVersion.swift` ⇄ `Extension/manifest.json` lệch nhau; kiểm tra nhanh bằng `bash scripts/check_versions.sh --no-dist`. Sau khi không còn job pending/active/needs_confirmation, quit app và cài staging:
 
 ```sh
 python3 scripts/install_release.py --stage "$idm_release_dir"
 ```
 
-Installer kiểm tra version/ID/signature, snapshot SQLite, checksum output, manifest và giữ bundle trước. Host Chrome trỏ đến helper trong đúng `dist/Internet Downloader.app`; helper chỉ mở bundle chứa nó. Mở bundle đó và Reload extension/tab. Popup phải báo kết nối đã xác minh; app/extension cũ không được coi là tương thích protocol 2.
+Installer kiểm tra version/ID/signature, snapshot SQLite, checksum output, manifest và giữ bundle trước. Đăng ký native host bằng `bash scripts/install_native_host.sh`: script tạo wrapper `~/Library/Application Support/InternetDownloader/native-host-wrapper.sh` (export `IDM_APP_PATH` trỏ đúng bundle) và trỏ cả 5 manifest Chromium-family vào wrapper; host tự mở app (kể cả khi app đang tắt, chờ tới ~10s) và helper không bao giờ ưu tiên bundle khác. Mở bundle `dist/Internet Downloader.app`, Reload extension và F5 tab. Popup phải báo `versionOk`; app/extension lệch phiên bản hiện mã `protocol_mismatch` thay vì im lặng.
 
 ## Rollback
 

@@ -30,7 +30,7 @@ public actor BrowserTransfers {
 
     public func command(_ request: IPCRequest) async -> IPCResponse {
         do {
-            guard request.protocolVersion == 2 else { throw BrowserFailure.protocolMismatch }
+            guard request.protocolVersion == AppVersion.protocolVersion else { throw BrowserFailure.protocolMismatch }
             guard let input = request.browser else { throw BrowserFailure.invalidTransfer }
             if request.action == "browser_create" { return try create(input) }
             if request.action == "browser_disconnect" {
@@ -172,7 +172,7 @@ public actor BrowserTransfers {
         throw BrowserFailure.transferFailed
     }
     private func reply(_ task: DownloadTask, token: String?) -> IPCResponse {
-        var extra = ["protocolVersion": "2", "appVersion": "1.1.0", "status": task.status.rawValue,
+        var extra = ["protocolVersion": "\(AppVersion.protocolVersion)", "appVersion": AppVersion.appVersion, "status": task.status.rawValue,
                      "phase": task.browserInfo?.phase ?? "", "verification": task.browserInfo?.verification ?? "NOT VERIFIED"]
         if let token { extra["token"] = token }
         return IPCResponse(success: true, taskId: task.id.uuidString, extra: extra)

@@ -10,6 +10,30 @@ public enum TaskStatus: String, Codable, Sendable {
     case needsConfirmation = "needs_confirmation"
 }
 
+/// Trạng thái kiểm chứng âm thanh của file đã tải.
+///
+/// Được ghi sau khi `MediaIntegrity` probe file, để UI không bao giờ hiển thị
+/// "hoàn tất" cho một file video không có tiếng mà không nói gì.
+public enum MediaAudioState: String, Codable, Sendable {
+    /// Đã probe và xác nhận có luồng audio.
+    case verified
+    /// Ban đầu thiếu tiếng, đã ghép bổ sung thành công.
+    case repaired
+    /// Nguồn thực sự không có tiếng (video câm, GIF-like) — không phải lỗi app.
+    case missingInSource = "missing_in_source"
+    /// Không kiểm tra được (thiếu ffprobe/ffmpeg, file hỏng).
+    case unchecked
+
+    public var label: String {
+        switch self {
+        case .verified: return "Đã kiểm tra tiếng"
+        case .repaired: return "Đã ghép bổ sung tiếng"
+        case .missingInSource: return "Nguồn không có tiếng"
+        case .unchecked: return "Chưa kiểm tra được tiếng"
+        }
+    }
+}
+
 public struct DownloadTask: Identifiable, Codable, Sendable {
     public let id: UUID
     public var url: URL
@@ -32,6 +56,8 @@ public struct DownloadTask: Identifiable, Codable, Sendable {
     public var cookies: String?
     public var headers: [String: String]?
     public var browserInfo: BrowserTaskInfo?
+    /// Kết quả kiểm chứng audio sau khi tải (xem `MediaIntegrity`).
+    public var audioState: MediaAudioState?
 
     public var progress: Double {
         if totalBytes > 0 {
@@ -71,7 +97,8 @@ public struct DownloadTask: Identifiable, Codable, Sendable {
         referrer: String? = nil,
         userAgent: String? = nil,
         cookies: String? = nil,
-        headers: [String: String]? = nil
+        headers: [String: String]? = nil,
+        audioState: MediaAudioState? = nil
     ) {
         self.id = id
         self.url = url
@@ -93,5 +120,6 @@ public struct DownloadTask: Identifiable, Codable, Sendable {
         self.userAgent = userAgent
         self.cookies = cookies
         self.headers = headers
+        self.audioState = audioState
     }
 }

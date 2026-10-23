@@ -45,6 +45,29 @@
     .status-dot.online { background: #30d158; }
     .status-dot.offline { background: #ff9f0a; }
 
+    /* Phiên bản app / extension + cảnh báo lệch phiên bản */
+    .version-row {
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+      margin: -6px 0 10px;
+      font-size: 10px;
+      line-height: 1.35;
+      color: #8e8e93;
+    }
+    .version-warning {
+      display: none;
+      margin-bottom: 10px;
+      padding: 7px 8px;
+      border-radius: 6px;
+      background: rgba(255, 159, 10, 0.14);
+      border: 1px solid #ff9f0a;
+      color: #ffb340;
+      font-size: 11px;
+      line-height: 1.35;
+    }
+    .version-warning.visible { display: block; }
+
     /* Media List Section */
     .media-section {
       margin-bottom: 12px;
@@ -215,6 +238,9 @@
     <span id="statusText">Tự động kết nối macOS App</span>
   </div>
 
+  <div class="version-row" id="versionInfo">Đang đọc phiên bản…</div>
+  <div class="version-warning" id="versionWarning"></div>
+
   <!-- Media phát hiện trên trang hiện tại -->
   <div class="media-section">
     <div class="media-header">
@@ -238,6 +264,14 @@
     <span class="toggle-label">Nút tải video / audio</span>
     <label class="toggle-switch">
       <input type="checkbox" id="toggleFloating" checked>
+      <span class="slider"></span>
+    </label>
+  </div>
+
+  <div class="toggle-row">
+    <span class="toggle-label">Tự động bắt đầu tải trong app</span>
+    <label class="toggle-switch">
+      <input type="checkbox" id="toggleAutoStart">
       <span class="slider"></span>
     </label>
   </div>

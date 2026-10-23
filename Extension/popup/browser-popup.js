@@ -34,14 +34,30 @@ async function showConfirmations() {
       const status = document.createElement('p'); status.textContent = job.message || job.phase; confirmations.appendChild(status);
       button(confirmations, 'Hủy phiên tải', () => send({action: 'browser_cancel', sessionId: job.sessionId}));
       if (job.phase !== 'needs_confirmation') continue;
+      // D-F11: lọc dropdown theo job.intents (URL đã bấm Save); chọn ngoài
+      // intents thì hiện cảnh báo nhưng vẫn cho xác nhận (user chịu trách nhiệm).
+      const intents = Array.isArray(job.intents) ? job.intents : [];
+      const isIntentMatch = (file) => intents.length === 0 || intents.includes(file.url);
       const files = await chrome.downloads.search({state: 'complete', orderBy: ['-startTime'], limit: 30});
+      const matched = files.filter(isIntentMatch);
+      const listed = matched.length ? matched : files;
       const select = document.createElement('select');
       const empty = document.createElement('option'); empty.value = ''; empty.textContent = 'Chọn đúng file Chrome đã lưu'; select.appendChild(empty);
-      for (const file of files) {
+      for (const file of listed) {
         const option = document.createElement('option'); option.value = file.id;
-        option.textContent = `${file.filename.split('/').pop()} · ${file.fileSize} B · #${file.id}`; select.appendChild(option);
+        option.textContent = `${String(file.filename).split('/').pop()} · ${file.fileSize} B · #${file.id}${isIntentMatch(file) ? '' : ' ⚠ ngoài nguồn đã bấm'}`; select.appendChild(option);
       }
       confirmations.appendChild(select);
+      const warn = document.createElement('p');
+      warn.textContent = matched.length
+        ? 'File này không khớp nguồn đã bấm — chỉ xác nhận nếu chắc chắn đó là file Chrome vừa lưu.'
+        : 'Không thấy file khớp nguồn đã bấm — chỉ xác nhận nếu chắc chắn đó là file Chrome vừa lưu.';
+      warn.style.display = 'none';
+      confirmations.appendChild(warn);
+      select.addEventListener('change', () => {
+        const chosen = listed.find((f) => String(f.id) === select.value);
+        warn.style.display = chosen && !isIntentMatch(chosen) ? '' : 'none';
+      });
       button(confirmations, 'Xác nhận đây là file đã chọn', async () => {
         if (!select.value) throw Error('Hãy chọn file trước');
         await send({action: 'browser_confirm_file', sessionId: job.sessionId, downloadId: Number(select.value)});

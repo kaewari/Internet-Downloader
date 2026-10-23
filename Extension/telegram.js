@@ -11,9 +11,22 @@
     const r = el.getBoundingClientRect();
     return r.width > 0 && r.height > 0 && r.bottom >= 0 && r.top <= innerHeight;
   };
-  const saveControl = el =>
-    (el.matches('a[download]') || /download|save (as|file|image|video|audio)|tải xuống|lưu (file|ảnh)|ダウンロード/i.test(
-      [el.title, el.getAttribute('aria-label'), el.className, ...[...el.querySelectorAll('[class]')].map(x => x.className)].join(' ')));
+  // D-F4: luôn gọi per-element saveControl(el), không bao giờ truyền mảng
+  // controls. Guard typeof để TypeError không bị scan nuốt thành im lặng.
+  const saveControl = el => {
+    if (!el || typeof el.matches !== 'function') return false;
+    try {
+      if (el.matches('a[download]')) return true;
+      const cls = typeof el.className === 'string' ? el.className : '';
+      const parts = [el.title, typeof el.getAttribute === 'function' ? el.getAttribute('aria-label') : '', cls];
+      try {
+        if (typeof el.querySelectorAll === 'function') {
+          for (const x of el.querySelectorAll('[class]')) parts.push(typeof x.className === 'string' ? x.className : '');
+        }
+      } catch (_) {}
+      return /download|save (as|file|image|video|audio)|tải xuống|lưu (file|ảnh)|ダウンロード/i.test(parts.join(' '));
+    } catch (_) { return false; }
+  };
   const isSave = el => saveControl(el) && !el.disabled && el.getAttribute('aria-disabled') !== 'true' &&
     !el.querySelector('.ProgressSpinner,.progress-spinner,[role="progressbar"]');
   const restricted = (el, scope) => !!(el.closest('.no-forwards') || scope.closest('.no-forwards'));
@@ -37,6 +50,10 @@
     const viewer = el.closest('.media-viewer-whole') || el.closest(viewerSelector);
     const scope = viewer || el.closest('[data-mid],[data-message-id]') || el.parentElement;
     if (!scope) throw Error('attachment_viewer_required');
+    // D-F3: no-forwards ném website_save_unavailable NGAY khi restricted đúng,
+    // trước mọi nhánh save (kể cả khi vẫn tìm thấy nút Save). Fingerprint giữ
+    // nguyên restricted để check() vẫn phát hiện đổi trạng thái.
+    if (restricted(el, scope)) throw Error('website_save_unavailable');
     const controls = [...scope.querySelectorAll('button,[role="button"],a[download],.btn-icon')].filter(x => visible(x) && saveControl(x));
     if (saveControl(el)) controls.push(el);
     let saves = controls.filter(isSave);
@@ -59,25 +76,40 @@
     const primary = el.matches('video,audio,img') ? el : viewer?.querySelector('video,audio,img');
     const kind = primary?.matches('video') ? 'video' : primary?.matches('audio') ? 'audio' : primary?.matches('img') ? 'image' : 'file';
     const item = {el, save, scope, fingerprint: fingerprint(el, save, scope)}; items.set(handle, item);
-    return {handle, requiresConfirmation: !viewer && !save.matches('a[download]'), source: el.currentSrc || el.src || el.href || '', mediaKind: kind, filename: `Attachment Telegram.${kind === 'video' ? 'mp4' : kind === 'audio' ? 'ogg' : kind === 'image' ? 'jpg' : 'bin'}`,
+    // D-F16: tên theo mid (scan() sẽ đánh lại index); bỏ tên cứng "Attachment Telegram.*".
+    return {handle, requiresConfirmation: !viewer && !save.matches('a[download]'), source: el.currentSrc || el.src || el.href || '', mediaKind: kind, filename: telegramFileName(scope, 0, kind),
       expectedDuration: Number.isFinite(el.duration) && el.duration > 0 ? el.duration : undefined};
   }
   function check(handle) {
     const item = items.get(handle);
     return !!item && visible(item.el) && (item.saving || (visible(item.save) && isSave(item.save))) && fingerprint(item.el, item.save, item.scope) === item.fingerprint;
   }
+  // D-F16: tên file theo mid/index thay vì cứng "Attachment Telegram.*".
+  const telegramFileName = (scope, index, kind) => {
+    let mid = '';
+    try { mid = scope.getAttribute('data-mid') || scope.getAttribute('data-message-id') || ''; } catch (_) {}
+    mid = String(mid).replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 32) || 'chat';
+    const ext = kind === 'video' ? 'mp4' : kind === 'audio' ? 'ogg' : kind === 'image' ? 'jpg' : 'bin';
+    return `Telegram_${mid}_${index}.${ext}`;
+  };
   window.__idmBrowser = {prepare, check, errorMessage,
     markSaving(handle) { if (!check(handle)) return false; items.get(handle).saving = true; return true; },
     scan() {
       const telegram = location.hostname === 'web.telegram.org';
       const selector = telegram ? '#MediaViewer video,#MediaViewer audio,#MediaViewer img,.media-viewer-whole video,.media-viewer-whole img,.MediaViewer video,.MediaViewer img,a[download],button,[role="button"],.btn-icon' : 'a[download],button,[role="button"]';
+      // D-F16: giới hạn scan trong viewer đang mở (nếu có) thay vì toàn document.
+      let root = null;
+      try { root = (typeof document.querySelector === 'function' && telegram) ? (document.querySelector('.media-viewer-whole,#MediaViewer,.MediaViewer') || null) : null; } catch (_) { root = null; }
+      const scope0 = root || document;
       const seen = new Map(), results = [];
-      for (const el of [...document.querySelectorAll(selector)].filter(visible)) {
+      for (const el of [...scope0.querySelectorAll(selector)].filter(visible)) {
         if (!el.matches('video,audio,img') && !isSave(el)) continue;
         try {
           const item = prepare(el), internal = items.get(item.handle);
           if (seen.has(internal.save)) { internal.save.setAttribute("data-idm-save", seen.get(internal.save)); items.delete(item.handle); continue; }
-          seen.set(internal.save, item.handle); results.push(item);
+          seen.set(internal.save, item.handle);
+          item.filename = telegramFileName(internal.scope, results.length, item.mediaKind);
+          results.push(item);
         } catch {}
         if (results.length >= 30) break;
       }

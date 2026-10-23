@@ -1,0 +1,175 @@
+{
+  "_comment": "Nguồn live cho kiểm thử pipeline của APP (không phải yt-dlp trực tiếp). Mỗi ca là một URL trang thật; app tự resolve rồi tải. expect_audio=true nghĩa là file cuối phải có CẢ luồng audio (bắt lỗi mất tiếng).",
+  "cases": [
+    {
+      "id": "youtube_watch",
+      "platform": "YouTube",
+      "kind": "Video chuẩn (/watch?v=...)",
+      "url": "https://www.youtube.com/watch?v=jNQXAC9IVRw",
+      "expect_video": true,
+      "expect_audio": true,
+      "required": true
+    },
+    {
+      "id": "youtube_shorts",
+      "platform": "YouTube",
+      "kind": "Shorts (/shorts/...)",
+      "url": "https://www.youtube.com/shorts/gEQ0BLyVJhY",
+      "expect_video": true,
+      "expect_audio": true,
+      "required": true
+    },
+    {
+      "id": "facebook_watch",
+      "platform": "Facebook",
+      "kind": "Watch (/watch)",
+      "url": "https://www.facebook.com/watch/?v=10153231379946729",
+      "expect_video": true,
+      "expect_audio": true,
+      "required": true
+    },
+    {
+      "id": "tiktok_detail",
+      "platform": "TikTok",
+      "kind": "Trang chi tiết /@user/video/...",
+      "url": "https://www.tiktok.com/@zachking/video/6768504823336815877",
+      "expect_video": true,
+      "expect_audio": true,
+      "required": true
+    },
+    {
+      "id": "vimeo_video",
+      "platform": "Vimeo",
+      "kind": "Video chuẩn (player.vimeo.com)",
+      "url": "https://player.vimeo.com/video/55555555",
+      "expect_video": true,
+      "expect_audio": true,
+      "required": true
+    },
+    {
+      "id": "dailymotion_video",
+      "platform": "Dailymotion",
+      "kind": "Video chuẩn",
+      "url": "https://www.dailymotion.com/video/x7tgad0",
+      "expect_video": true,
+      "expect_audio": true,
+      "required": true
+    },
+    {
+      "id": "bilibili_video",
+      "platform": "Bilibili",
+      "kind": "Video chuẩn",
+      "url": "https://www.bilibili.com/video/BV1xx411c7mD",
+      "expect_video": true,
+      "expect_audio": true,
+      "required": true
+    },
+    {
+      "id": "instagram_reel",
+      "platform": "Instagram",
+      "kind": "Reel (/reel/...)",
+      "url": "https://www.instagram.com/reel/C3bV8Uyrz2p/",
+      "expect_video": true,
+      "expect_audio": true,
+      "required": false
+    },
+    {
+      "id": "twitter_status",
+      "platform": "Twitter / X",
+      "kind": "Bài đăng có video (/status/...)",
+      "url": "https://x.com/Interior/status/463440424141459456",
+      "note": "Rendition mp4 của X cho tweet này không có luồng audio → chỉ kiểm tra video.",
+      "expect_video": true,
+      "expect_audio": false,
+      "required": false
+    },
+    {
+      "id": "reddit_hls",
+      "platform": "Reddit",
+      "kind": "v.redd.it HLS (media URL — app tự xử lý)",
+      "url": "https://v.redd.it/d77amxm51ivh1/HLSPlaylist.m3u8",
+      "expect_video": true,
+      "expect_audio": true,
+      "required": true
+    },
+    {
+      "id": "reddit_post",
+      "platform": "Reddit",
+      "kind": "Bài đăng video (v.redd.it)",
+      "url": "https://www.reddit.com/r/videos/comments/d77amxm51ivh1/",
+      "note": "Trang Reddit trỏ tới v.redd.it có audio; ca tuỳ chọn (Reddit hay chặn/403 nên không bắt buộc). Nếu nguồn trả về video không tiếng thì báo FAIL để rà lại.",
+      "expect_video": true,
+      "expect_audio": true,
+      "required": false
+    },
+    {
+      "id": "facebook_reel",
+      "platform": "Facebook",
+      "kind": "Reel (/reel/...)",
+      "url": "https://www.facebook.com/reel/769248322391575",
+      "expect_video": true,
+      "expect_audio": true,
+      "required": false
+    },
+    {
+      "id": "direct_mp4",
+      "platform": "Generic Video",
+      "kind": "File MP4 trực tiếp",
+      "url": "https://www.w3schools.com/html/mov_bbb.mp4",
+      "note": "Đã ffprobe file thật: có luồng video H.264 + audio AAC → bắt buộc giữ audio.",
+      "expect_video": true,
+      "expect_audio": true,
+      "required": true
+    },
+    {
+      "id": "direct_webm",
+      "platform": "Generic Video",
+      "kind": "File WebM trực tiếp",
+      "url": "https://interactive-examples.mdn.mozilla.net/media/cc0-videos/flower.webm",
+      "note": "Đã ffprobe file thật: có luồng video VP8 + audio Vorbis → bắt buộc giữ audio.",
+      "expect_video": true,
+      "expect_audio": true,
+      "required": true
+    },
+    {
+      "id": "direct_mkv",
+      "platform": "Generic Video",
+      "kind": "File MKV trực tiếp",
+      "url": "https://raw.githubusercontent.com/ietf-wg-cellar/matroska-test-files/master/test_files/test1.mkv",
+      "note": "Đã ffprobe file thật: có luồng video MSMPEG4v2 + audio MP3 → bắt buộc giữ audio.",
+      "expect_video": true,
+      "expect_audio": true,
+      "required": true
+    },
+    {
+      "id": "hls_stream",
+      "platform": "Streaming HLS",
+      "kind": "HLS master playlist (.m3u8, audio ghép trong variant)",
+      "url": "https://devstreaming-cdn.apple.com/videos/streaming/examples/bipbop_4x3/bipbop_4x3_variant.m3u8",
+      "note": "Master 4x3 của Apple: audio nằm ngay trong variant (không có EXT-X-MEDIA audio riêng). Ca hls_master_audio mới là ca tách audio.",
+      "expect_video": true,
+      "expect_audio": true,
+      "required": true
+    },
+    {
+      "id": "hls_master_audio",
+      "platform": "Streaming HLS",
+      "kind": "HLS master playlist có EXT-X-MEDIA TYPE=AUDIO riêng",
+      "url": "https://devstreaming-cdn.apple.com/videos/streaming/examples/bipbop_16x9/bipbop_16x9_variant.m3u8",
+      "note": "Master đa audio của Apple (2 rendition EXT-X-MEDIA TYPE=AUDIO, variant AUDIO=\"bipbop_audio\"); đã kiểm tra master trả 200 và segment variant có cả AAC + H.264. Đây là ca bắt lỗi 'tải HLS về mất tiếng'.",
+      "expect_video": true,
+      "expect_audio": true,
+      "required": true
+    },
+    {
+      "id": "embed_sniffed",
+      "platform": "Embedded / Sniffed",
+      "kind": "Trang nhúng iframe (recordplay.biz)",
+      "url": "https://recordplay.biz/e/20enthat5erf",
+      "note": "Nguồn nhúng không đảm bảo: vẫn yêu cầu audio (video phải có tiếng); nếu nguồn vốn không có audio thì báo FAIL để rà lại thay vì âm thầm PASS.",
+      "expect_video": true,
+      "expect_audio": true,
+      "required": false
+    }
+  ]
+}

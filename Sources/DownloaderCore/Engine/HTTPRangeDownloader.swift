@@ -1,4 +1,7 @@
 import Foundation
+import os
+
+private let log = Logger(subsystem: "com.internet-downloader", category: "range-downloader")
 
 public struct ProbeResult: Sendable {
     public let totalBytes: Int64
@@ -6,6 +9,21 @@ public struct ProbeResult: Sendable {
     public let etag: String?
     public let lastModified: String?
     public let suggestedFilename: String?
+}
+
+/// Server đổi file giữa lúc resume (412 Precondition Failed / 416 Range Not
+/// Satisfiable sau khi gửi If-Range). Không retry Range cũ — caller (A-F11)
+/// phải re-probe rồi rebuild segments.
+public struct HTTPResourceChangedError: LocalizedError, Sendable {
+    public let statusCode: Int
+
+    public init(statusCode: Int) {
+        self.statusCode = statusCode
+    }
+
+    public var errorDescription: String? {
+        "Tài nguyên trên máy chủ đã thay đổi (HTTP \(statusCode)) — nhấn Tiếp tục để dò lại và tải lại"
+    }
 }
 
 public protocol HTTPRangeDownloaderDelegate: AnyObject, Sendable {
@@ -180,10 +198,29 @@ public actor HTTPRangeDownloader {
             getRequest.setValue(cookies, forHTTPHeaderField: "Cookie")
         }
 
-        if let (getData, getResponse) = try? await activeSession.data(for: getRequest),
-           let getHTTP = getResponse as? HTTPURLResponse,
-           (200...299).contains(getHTTP.statusCode) {
-            return parseHeaders(from: getHTTP, url: url, headerData: getData.prefix(512))
+        do {
+            let (probeOutcome, _) = try await readRangeGetProbe(getRequest, session: activeSession)
+            switch probeOutcome {
+            case .success(let data, let getHTTP):
+                return parseHeaders(from: getHTTP, url: url, headerData: data)
+            case .failure(let status, _):
+                if let headProbeResult = headProbeResult {
+                    return headProbeResult
+                }
+                throw NSError(
+                    domain: "HTTPRangeDownloader",
+                    code: status,
+                    userInfo: [NSLocalizedDescriptionKey: "Server trả về HTTP \(status) khi dò file — kiểm tra liên kết hoặc quyền truy cập."]
+                )
+            }
+        } catch {
+            // A-F18: Range probe lỗi mà HEAD đã có kết quả → giữ HEAD;
+            // không còn gì trong tay → throw để caller retry (không nuốt).
+            if let headProbeResult = headProbeResult {
+                log.warning("Range probe failed (\(error.localizedDescription)) — keeping HEAD result for \(url.absoluteString)")
+                return headProbeResult
+            }
+            throw error
         }
 
         if let headProbeResult = headProbeResult {
@@ -203,6 +240,48 @@ public actor HTTPRangeDownloader {
             lastModified: nil,
             suggestedFilename: fallbackName
         )
+    }
+
+    private enum RangeProbeOutcome {
+        case success(data: Data, response: HTTPURLResponse)
+        case failure(status: Int, capturedData: Data?)
+    }
+
+    // Streaming Range-GET probe: đọc tối đa 512 byte đầu rồi hủy stream để
+    // không nạp toàn bộ file vào RAM khi server ignore Range trả 200.
+    //
+    // A-F18: mọi catch đều log + throw để caller retry — không nuốt lỗi thành
+    // `nil` câm (trừ lỗi đọc stream giữa chừng: giữ dữ liệu đã đọc, chỉ log).
+    private static func readRangeGetProbe(_ request: URLRequest, session: URLSession) async throws -> (RangeProbeOutcome, HTTPURLResponse?) {
+        do {
+            let (stream, response) = try await session.bytes(for: request)
+            guard let http = response as? HTTPURLResponse else {
+                throw URLError(.badServerResponse)
+            }
+            var data = Data()
+            data.reserveCapacity(512)
+            do {
+                for try await byte in stream {
+                    data.append(byte)
+                    if data.count >= 512 { break }
+                }
+            } catch {
+                log.warning("Range-GET probe stream interrupted for \(request.url?.absoluteString ?? "?"): \(error.localizedDescription)")
+            }
+
+            if (200...299).contains(http.statusCode) {
+                return (.success(data: data, response: http), http)
+            }
+            return (.failure(status: http.statusCode, capturedData: data), http)
+        } catch {
+            log.warning("Range-GET probe failed for \(request.url?.absoluteString ?? "?"): \(error.localizedDescription)")
+            throw error
+        }
+    }
+
+    private static func getResponseForStatus(_ status: Int, request: URLRequest) -> HTTPURLResponse {
+        let best = (200...599).contains(status) ? status : 400
+        return HTTPURLResponse(url: request.url ?? URL(fileURLWithPath: "/"), statusCode: best, httpVersion: nil, headerFields: [:]) ?? HTTPURLResponse()
     }
 
     private static func parseHeaders(from response: HTTPURLResponse, url: URL, headerData: Data? = nil) -> ProbeResult {
@@ -322,7 +401,8 @@ public actor HTTPRangeDownloader {
         task: DownloadTask,
         segments: [DownloadSegment],
         onProgress: @escaping @Sendable (Int64, Double) -> Void,
-        onSegmentUpdate: @escaping @Sendable (DownloadSegment) -> Void
+        onSegmentUpdate: @escaping @Sendable (DownloadSegment) -> Void,
+        onReprobe: (@Sendable (ProbeResult) -> Void)? = nil
     ) async throws {
         isPaused = false
         isCancelled = false
@@ -347,10 +427,14 @@ public actor HTTPRangeDownloader {
             try fileManager.createDirectory(at: destDir, withIntermediateDirectories: true)
         }
 
-        // Direct sparse file allocation on APFS: pre-allocate total size instantly
+        // Direct sparse file allocation on APFS: pre-allocate total size instantly.
+        // Chỉ khởi tạo lúc file CHƯA tồn tại — truncate lặp lại giữa lúc các segment
+        // khác đang ghi sẽ xoá mất dữ liệu. File vì đã có là checkpoint cũ (resume).
         let targetFile = task.finalFilePath
         if !fileManager.fileExists(atPath: targetFile.path) {
-            fileManager.createFile(atPath: targetFile.path, contents: nil)
+            if !fileManager.createFile(atPath: targetFile.path, contents: nil) {
+                throw NSError(domain: "HTTPRangeDownloader", code: 1, userInfo: [NSLocalizedDescriptionKey: "Không tạo được file đích: \(targetFile.path)"])
+            }
             if task.totalBytes > 0 {
                 let initHandle = try FileHandle(forWritingTo: targetFile)
                 try initHandle.truncate(atOffset: UInt64(task.totalBytes))
@@ -358,6 +442,7 @@ public actor HTTPRangeDownloader {
             }
         }
 
+        var updatedTask = task
         var updatedSegments = segments
         if updatedSegments.isEmpty {
             updatedSegments = Self.calculateSegments(
@@ -368,6 +453,81 @@ public actor HTTPRangeDownloader {
             )
         }
 
+        // A-F11: resource đổi giữa chừng (412/416 sau If-Range) → re-probe rồi
+        // rebuild segments đúng 1 lần, sau đó chạy lại từ đầu trên file mới.
+        var didReprobe = false
+        while true {
+            do {
+                try await runSegments(
+                    task: updatedTask,
+                    segments: updatedSegments,
+                    targetFile: targetFile,
+                    onProgress: onProgress,
+                    onSegmentUpdate: onSegmentUpdate
+                )
+                return
+            } catch let stale as HTTPResourceChangedError where !didReprobe {
+                if Task.isCancelled { throw CancellationError() }
+                didReprobe = true
+                log.warning("Resource changed mid-download (HTTP \(stale.statusCode)) — re-probing \(updatedTask.url.absoluteString)")
+                let probe = try await Self.probeURL(
+                    url: updatedTask.url,
+                    customHeaders: updatedTask.headers,
+                    cookies: updatedTask.cookies,
+                    userAgent: updatedTask.userAgent
+                )
+                let unchanged = probe.totalBytes == updatedTask.totalBytes
+                    && probe.acceptRanges == updatedTask.acceptRanges
+                    && (probe.etag ?? "") == (updatedTask.etag ?? "")
+                if unchanged {
+                    // Kích thước/etag không đổi — Range cũ vẫn đúng, lỗi không
+                    // phải do resource đổi → ném lại lỗi gốc.
+                    throw stale
+                }
+                updatedTask.totalBytes = probe.totalBytes
+                updatedTask.acceptRanges = probe.acceptRanges
+                updatedTask.etag = probe.etag
+                updatedTask.lastModified = probe.lastModified
+                try Self.resizeTargetFile(at: targetFile, to: probe.totalBytes)
+                updatedSegments = Self.calculateSegments(
+                    taskId: updatedTask.id,
+                    totalBytes: probe.totalBytes,
+                    segmentCount: max(1, updatedSegments.count),
+                    acceptRanges: probe.acceptRanges
+                )
+                // Báo cho DownloadManager đồng bộ DB (totalBytes/etag/segments).
+                onReprobe?(probe)
+            }
+        }
+    }
+
+    /// Đổi kích thước file đích sau re-probe: resource mới thay hoàn toàn
+    /// resource cũ nên truncate/xoá để ghi lại từ đầu (không giữ byte cũ).
+    private static func resizeTargetFile(at targetFile: URL, to totalBytes: Int64) throws {
+        let fileManager = FileManager.default
+        if totalBytes > 0 {
+            if !fileManager.fileExists(atPath: targetFile.path) {
+                fileManager.createFile(atPath: targetFile.path, contents: nil)
+            }
+            let handle = try FileHandle(forWritingTo: targetFile)
+            try handle.truncate(atOffset: UInt64(totalBytes))
+            try handle.close()
+        } else {
+            try? fileManager.removeItem(at: targetFile)
+            fileManager.createFile(atPath: targetFile.path, contents: nil)
+        }
+    }
+
+    /// Chạy toàn bộ segments qua task group (tách khỏi `download` để vòng
+    /// re-probe A-F11 có thể gọi lại với segments đã rebuild).
+    private func runSegments(
+        task: DownloadTask,
+        segments: [DownloadSegment],
+        targetFile: URL,
+        onProgress: @escaping @Sendable (Int64, Double) -> Void,
+        onSegmentUpdate: @escaping @Sendable (DownloadSegment) -> Void
+    ) async throws {
+        var updatedSegments = segments
         let coordinator = HTTPDownloadProgressCoordinator(
             segments: updatedSegments,
             onProgress: onProgress,
@@ -377,7 +537,7 @@ public actor HTTPRangeDownloader {
         try await withThrowingTaskGroup(of: DownloadSegment.self) { group in
             for segment in updatedSegments {
                 group.addTask { [self] in
-                    try await self.downloadSegmentDirect(
+                    try await self.downloadSegmentWithRetry(
                         segment: segment,
                         task: task,
                         targetFile: targetFile,
@@ -398,7 +558,45 @@ public actor HTTPRangeDownloader {
         }
 
         // Clean up temporary checkpoint directory if any
-        try? fileManager.removeItem(at: task.tempDirectory)
+        try? FileManager.default.removeItem(at: task.tempDirectory)
+    }
+
+    private func downloadSegmentWithRetry(
+        segment: DownloadSegment,
+        task: DownloadTask,
+        targetFile: URL,
+        coordinator: HTTPDownloadProgressCoordinator
+    ) async throws -> DownloadSegment {
+        var currentSegment = segment
+        var attempt = 0
+        while true {
+            do {
+                return try await downloadSegmentDirect(
+                    segment: currentSegment,
+                    task: task,
+                    targetFile: targetFile,
+                    coordinator: coordinator
+                )
+            } catch {
+                if error is CancellationError || (error as? URLError)?.code == .cancelled {
+                    throw error
+                }
+                // A-F10: gộp điều kiện vào shouldRetry — không còn `-1` thủ công.
+                // HTTPResourceChangedError (412/416) không retry ở đây mà xử lý
+                // ở vòng re-probe của `download` (isRetryable == false).
+                guard RetryPolicy.shouldRetry(failedAttempt: attempt, error: error) else {
+                    throw error
+                }
+                // Tôn trọng header Retry-After nếu server gửi kèm.
+                let retryAfter = (error as NSError).userInfo["retryAfter"] as? String
+                let delay = RetryPolicy.retryDelay(attempt: attempt, retryAfterHeader: retryAfter) ?? 1.0
+                attempt += 1
+                log.warning("Segment \(currentSegment.index) failed (\(error.localizedDescription)), retrying attempt \(attempt)/\(RetryPolicy.maxAttempts) after \(delay)s")
+                currentSegment.downloadedBytes = min(currentSegment.downloadedBytes, currentSegment.expectedBytes > 0 ? currentSegment.expectedBytes : currentSegment.downloadedBytes)
+                try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+                if Task.isCancelled { throw CancellationError() }
+            }
+        }
     }
 
     private func downloadSegmentDirect(
@@ -429,6 +627,17 @@ public actor HTTPRangeDownloader {
             }
         }
 
+        // A-F7: resume gửi điều kiện tiền đề để phát hiện file đổi giữa chừng:
+        // ưu tiên If-Range(etag), fallback If-Unmodified-Since(lastModified).
+        // Chỉ gửi khi resume (đã có byte) — tải mới không cần.
+        if currentSegment.downloadedBytes > 0 {
+            if let etag = task.etag, !etag.isEmpty {
+                request.setValue(etag, forHTTPHeaderField: "If-Range")
+            } else if let lastModified = task.lastModified, !lastModified.isEmpty {
+                request.setValue(lastModified, forHTTPHeaderField: "If-Unmodified-Since")
+            }
+        }
+
         if task.acceptRanges {
             let rangeStart = currentSegment.startByte + currentSegment.downloadedBytes
             let rangeEnd = currentSegment.endByte > 0 ? "\(currentSegment.endByte)" : ""
@@ -450,18 +659,41 @@ public actor HTTPRangeDownloader {
         }
 
         guard (200...299).contains(httpResponse.statusCode) else {
+            // A-F7/A-F11: 412 (If-Range fail) / 416 (Range không thỏa — file đã
+            // đổi/khác kích thước) → throw riêng để caller re-probe + rebuild
+            // segments, không retry Range cũ và không gộp lỗi 4xx chung.
+            if httpResponse.statusCode == 412 || httpResponse.statusCode == 416 {
+                throw HTTPResourceChangedError(statusCode: httpResponse.statusCode)
+            }
             let msg = "Server returned HTTP \(httpResponse.statusCode) (\(HTTPURLResponse.localizedString(forStatusCode: httpResponse.statusCode)))"
-            throw NSError(domain: "HTTPRangeDownloader", code: httpResponse.statusCode, userInfo: [NSLocalizedDescriptionKey: msg])
+            throw NSError(
+                domain: "HTTPRangeDownloader",
+                code: httpResponse.statusCode,
+                userInfo: [
+                    NSLocalizedDescriptionKey: msg,
+                    // Giữ header Retry-After để lần retry dùng đúng thời gian chờ.
+                    "retryAfter": httpResponse.value(forHTTPHeaderField: "Retry-After") ?? ""
+                ]
+            )
         }
 
-        let expectsMedia = ["mp4","mkv","mov","avi","webm","mp3","m4a","flac","wav","aac","ogg","ts"].contains(URL(fileURLWithPath: task.filename).pathExtension.lowercased())
-        if expectsMedia && (httpResponse.mimeType?.lowercased().contains("html") ?? false) {
-            throw NSError(domain: "HTTPRangeDownloader", code: 415, userInfo: [NSLocalizedDescriptionKey: "Nguồn trả HTML thay vì media"])
+        // Chỉ coi là lỗi khi tệp đích KHÔNG phải HTML (tải file .html là hợp lệ).
+        let responseIsHTML = httpResponse.mimeType?.lowercased().contains("html") ?? false
+        if responseIsHTML, !Self.isHTMLFileName(task.filename) {
+            throw NSError(domain: "HTTPRangeDownloader", code: 415, userInfo: [NSLocalizedDescriptionKey: "Nguồn trả HTML thay vì file"])
         }
 
-        if task.acceptRanges && httpResponse.statusCode != 206 && currentSegment.downloadedBytes > 0 {
+        // Server trả 200 toàn bộ (bỏ qua Range): bỏ qua startByte byte đầu
+        // của body để chỉ ghi phần thuộc cửa sổ segment này.
+        var discardLeadingBytes: Int64 = 0
+
+        if task.acceptRanges && httpResponse.statusCode != 206 {
+            // Server quảng cáo Accept-Ranges nhưng bỏ qua Range, trả 200 toàn bộ
+            // body — reset segment và bỏ qua startByte byte đầu để ghi đúng
+            // cửa sổ của segment (nếu ghi thẳng sẽ lệch vị trí dữ liệu).
             currentSegment.downloadedBytes = 0
             try handle.seek(toOffset: UInt64(currentSegment.startByte))
+            discardLeadingBytes = currentSegment.startByte
         }
 
         // High-performance batched chunk streaming (64KB buffer)
@@ -469,12 +701,30 @@ public actor HTTPRangeDownloader {
         buffer.reserveCapacity(65536)
         var unrecordedBytes: Int64 = 0
 
+        let segmentEndByte: Int64 = currentSegment.endByte
+        // Clamp write vào khoảng của segment (endByte INCLUSIVE: room = end - start + 1);
+        // server có thể gửi dư (200 full body) hoặc nhiều hơn Range xin.
+        // Trả về true nghĩa là server còn gửi thêm byte ngoài cửa sổ segment.
+        let writeClamped = { () throws -> Bool in
+            var room = Int64.max
+            if segmentEndByte >= 0 {
+                room = segmentEndByte - currentSegment.startByte + 1 - currentSegment.downloadedBytes
+            }
+            let available = Int64(buffer.count)
+            let keep = min(available, max(0, room))
+            if keep > 0 {
+                try handle.write(contentsOf: buffer.prefix(Int(keep)))
+                currentSegment.downloadedBytes += keep
+                unrecordedBytes += keep
+            }
+            let overflow = keep < available
+            buffer.removeAll(keepingCapacity: true)
+            return overflow
+        }
+
         let flushAndPauseSegment = { () throws -> DownloadSegment in
             if !buffer.isEmpty {
-                try handle.write(contentsOf: buffer)
-                currentSegment.downloadedBytes += Int64(buffer.count)
-                unrecordedBytes += Int64(buffer.count)
-                buffer.removeAll(keepingCapacity: true)
+                _ = try writeClamped()
             }
             if unrecordedBytes > 0 {
                 self.speedTracker.record(bytes: unrecordedBytes)
@@ -490,18 +740,26 @@ public actor HTTPRangeDownloader {
                     return try flushAndPauseSegment()
                 }
 
+                if discardLeadingBytes > 0 {
+                    discardLeadingBytes -= 1
+                    continue
+                }
+
                 buffer.append(byte)
 
-                if expectsMedia && currentSegment.startByte == 0 && currentSegment.downloadedBytes == 0 && buffer.count == 512 {
+                if currentSegment.startByte == 0 && currentSegment.downloadedBytes == 0 && buffer.count == 512 {
                     let prefix = String(decoding: buffer, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-                    if prefix.hasPrefix("<!doctype html") || prefix.hasPrefix("<html") { throw URLError(.cannotDecodeContentData) }
+                    if Self.looksLikeHTML(prefix), !Self.isHTMLFileName(task.filename) {
+                        throw NSError(domain: "HTTPRangeDownloader", code: 415, userInfo: [NSLocalizedDescriptionKey: "Nguồn trả HTML thay vì file (có thể trang login/captcha)"])
+                    }
                 }
                 if buffer.count >= 65536 {
-                    try handle.write(contentsOf: buffer)
-                    let count = Int64(buffer.count)
-                    currentSegment.downloadedBytes += count
-                    unrecordedBytes += count
-                    buffer.removeAll(keepingCapacity: true)
+                    _ = try writeClamped()
+
+                    if currentSegment.endByte >= 0 && currentSegment.startByte + currentSegment.downloadedBytes > currentSegment.endByte {
+                        // Đã đủ byte của segment — bỏ byte dư server gửi thêm
+                        break
+                    }
 
                     // Update speed stats once every 256KB to minimize mutex contention
                     if unrecordedBytes >= 262144 {
@@ -525,15 +783,15 @@ public actor HTTPRangeDownloader {
         }
 
         if !buffer.isEmpty {
-            if expectsMedia && currentSegment.startByte == 0 && currentSegment.downloadedBytes == 0 {
+            // HTML ngắn (<512) tới tận final flush — vẫn phải bắt, trừ khi tệp đích
+            // là HTML/XHTML (tải trang web là hợp lệ).
+            if currentSegment.startByte == 0 && currentSegment.downloadedBytes == 0 {
                 let prefix = String(decoding: buffer, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-                if prefix.hasPrefix("<!doctype html") || prefix.hasPrefix("<html") { throw URLError(.cannotDecodeContentData) }
+                if Self.looksLikeHTML(prefix), !Self.isHTMLFileName(task.filename) {
+                    throw NSError(domain: "HTTPRangeDownloader", code: 415, userInfo: [NSLocalizedDescriptionKey: "Nguồn trả HTML thay vì file (có thể trang login/captcha)"])
+                }
             }
-            try handle.write(contentsOf: buffer)
-            let count = Int64(buffer.count)
-            currentSegment.downloadedBytes += count
-            unrecordedBytes += count
-            buffer.removeAll(keepingCapacity: true)
+            _ = try writeClamped()
         }
 
         if unrecordedBytes > 0 {
@@ -551,5 +809,20 @@ public actor HTTPRangeDownloader {
 
     public func cancel() {
         isCancelled = true
+    }
+
+    // MARK: - Helpers
+
+    /// Body bắt đầu bằng thẻ HTML → nhiều khả năng server trả về trang login/captcha.
+    static func looksLikeHTML(_ prefix: String) -> Bool {
+        let trimmed = prefix.trimmingCharacters(in: .whitespacesAndNewlines)
+        let lowered = trimmed.lowercased()
+        return lowered.hasPrefix("<!doctype html") || lowered.hasPrefix("<html")
+    }
+
+    /// Tệp đích cố ý là HTML/XHTML → nội dung HTML là hợp lệ, không phải lỗi.
+    static func isHTMLFileName(_ filename: String) -> Bool {
+        let ext = URL(fileURLWithPath: filename).pathExtension.lowercased()
+        return ext == "html" || ext == "htm" || ext == "xhtml"
     }
 }

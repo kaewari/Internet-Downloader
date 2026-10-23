@@ -1,7 +1,8 @@
 import SwiftUI
 import DownloaderCore
 
-public struct TaskRowView: View {
+/// Equatable theo nội dung hiển thị (bỏ qua closure) để List bỏ qua row không đổi (C-F2).
+public struct TaskRowView: View, Equatable {
     public let task: DownloadTask
     public let isSelected: Bool
     public let onPause: () -> Void
@@ -10,6 +11,7 @@ public struct TaskRowView: View {
     public let onOpen: () -> Void
     public let onReveal: () -> Void
     public let onRefreshAddress: (() -> Void)?
+    public let onRetryAudio: (() -> Void)?
 
     public init(
         task: DownloadTask,
@@ -19,7 +21,8 @@ public struct TaskRowView: View {
         onDelete: @escaping () -> Void,
         onOpen: @escaping () -> Void,
         onReveal: @escaping () -> Void,
-        onRefreshAddress: (() -> Void)? = nil
+        onRefreshAddress: (() -> Void)? = nil,
+        onRetryAudio: (() -> Void)? = nil
     ) {
         self.task = task
         self.isSelected = isSelected
@@ -29,12 +32,29 @@ public struct TaskRowView: View {
         self.onOpen = onOpen
         self.onReveal = onReveal
         self.onRefreshAddress = onRefreshAddress
+        self.onRetryAudio = onRetryAudio
+    }
+
+    public static func == (lhs: TaskRowView, rhs: TaskRowView) -> Bool {
+        lhs.task.id == rhs.task.id
+            && lhs.task.filename == rhs.task.filename
+            && lhs.task.status == rhs.task.status
+            && lhs.task.downloadedBytes == rhs.task.downloadedBytes
+            && lhs.task.totalBytes == rhs.task.totalBytes
+            && lhs.task.speed == rhs.task.speed
+            && lhs.task.segmentsCount == rhs.task.segmentsCount
+            && lhs.task.downloadedSegmentsCount == rhs.task.downloadedSegmentsCount
+            && lhs.task.errorMessage == rhs.task.errorMessage
+            && lhs.task.audioState == rhs.task.audioState
+            && lhs.task.browserInfo?.phase == rhs.task.browserInfo?.phase
+            && lhs.task.browserInfo?.verification == rhs.task.browserInfo?.verification
+            && lhs.isSelected == rhs.isSelected
     }
 
     public var body: some View {
         HStack(spacing: 12) {
             // File Icon
-            Image(systemName: fileIconName(for: task.filename))
+            Image(systemName: FileTypeHelper.iconName(for: task.filename))
                 .font(.system(size: 24))
                 .foregroundColor(.accentColor)
                 .frame(width: 32)
@@ -53,6 +73,8 @@ public struct TaskRowView: View {
                 ProgressView(value: task.progress)
                     .progressViewStyle(LinearProgressViewStyle())
                     .frame(height: 6)
+                    .accessibilityLabel("Tiến độ tải \(task.filename)")
+                    .accessibilityValue("\(Int((task.progress * 100).rounded())) phần trăm")
 
                 // Sub-info: sizes, speed, ETA
                 HStack(spacing: 8) {
@@ -61,7 +83,7 @@ public struct TaskRowView: View {
                         .foregroundColor(.secondary)
 
                     if task.status == .downloading && task.speed > 0 {
-                        Text("• " + formatSpeed(task.speed))
+                        Text("• " + FileTypeHelper.formatSpeed(task.speed))
                             .font(.system(size: 11, weight: .medium))
                             .foregroundColor(.blue)
                     }
@@ -70,66 +92,94 @@ public struct TaskRowView: View {
                         Text("\(info.phaseLabel) · \(info.verification)").font(.caption2).foregroundColor(.secondary)
                     }
 
+                    if let audio = task.audioState, audio == .missingInSource || audio == .unchecked {
+                        Text("• " + audio.label)
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundColor(.orange)
+                    } else if let audio = task.audioState, audio == .repaired {
+                        Text("• " + audio.label)
+                            .font(.system(size: 11))
+                            .foregroundColor(.green)
+                    }
+
                     if let err = task.errorMessage {
                         Text("• " + err)
                             .font(.system(size: 11))
                             .foregroundColor(.red)
-                            .lineLimit(1)
+                            .lineLimit(2)
                     }
 
                     Spacer()
 
-                    // Quick Action Buttons
+                    // Quick Action Buttons (C-F11: hit-target tối thiểu 28pt)
                     HStack(spacing: 6) {
                         if task.status == .downloading || task.status == .pending {
                             Button(action: onPause) {
                                 Image(systemName: "pause.fill")
                                     .font(.system(size: 10))
-                                    .frame(width: 22, height: 22)
+                                    .frame(minWidth: 28, minHeight: 28)
                                     .contentShape(Rectangle())
                             }
                             .buttonStyle(.plain)
                             .help(task.browserInfo == nil ? "Tạm dừng" : "Hủy phiên tải trình duyệt")
+                            .accessibilityLabel(task.browserInfo == nil ? "Tạm dừng \(task.filename)" : "Hủy phiên tải trình duyệt \(task.filename)")
                         } else if task.status == .paused || task.status == .failed {
                             Button(action: onResume) {
                                 Image(systemName: "play.fill")
                                     .font(.system(size: 10))
-                                    .frame(width: 22, height: 22)
+                                    .frame(minWidth: 28, minHeight: 28)
                                     .contentShape(Rectangle())
                             }
                             .buttonStyle(.plain)
                             .help("Tiếp tục tải")
+                            .accessibilityLabel("Tiếp tục tải \(task.filename)")
                         }
 
                         if task.status == .completed {
                             Button(action: onOpen) {
                                 Image(systemName: "arrow.up.forward.app")
                                     .font(.system(size: 11))
-                                    .frame(width: 22, height: 22)
+                                    .frame(minWidth: 28, minHeight: 28)
                                     .contentShape(Rectangle())
                             }
                             .buttonStyle(.plain)
                             .help("Mở file")
+                            .accessibilityLabel("Mở file \(task.filename)")
 
                             Button(action: onReveal) {
                                 Image(systemName: "folder")
                                     .font(.system(size: 11))
-                                    .frame(width: 22, height: 22)
+                                    .frame(minWidth: 28, minHeight: 28)
                                     .contentShape(Rectangle())
                             }
                             .buttonStyle(.plain)
                             .help("Hiển thị trong Finder")
+                            .accessibilityLabel("Hiển thị \(task.filename) trong Finder")
+                        }
+
+                        if let onRetryAudio, task.status == .failed || task.audioState == .missingInSource {
+                            Button(action: onRetryAudio) {
+                                Image(systemName: "waveform.badge.magnifyingglass")
+                                    .font(.system(size: 11))
+                                    .foregroundColor(.orange)
+                                    .frame(minWidth: 28, minHeight: 28)
+                                    .contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+                            .help("Tải lại bằng yt-dlp để lấy tiếng")
+                            .accessibilityLabel("Tải lại \(task.filename) bằng yt-dlp để lấy tiếng")
                         }
 
                         Button(action: onDelete) {
                             Image(systemName: "trash")
                                 .font(.system(size: 11))
                                 .foregroundColor(.secondary)
-                                .frame(width: 22, height: 22)
+                                .frame(minWidth: 28, minHeight: 28)
                                 .contentShape(Rectangle())
                         }
                         .buttonStyle(.plain)
                         .help("Xóa nhiệm vụ")
+                        .accessibilityLabel("Xóa nhiệm vụ \(task.filename)")
                     }
                 }
             }
@@ -146,6 +196,12 @@ public struct TaskRowView: View {
             } else if task.status == .paused || task.status == .failed {
                 Button(action: onResume) {
                     Label("Tiếp tục tải", systemImage: "play.fill")
+                }
+            }
+
+            if let onRetryAudio, task.status == .failed || task.audioState == .missingInSource {
+                Button(action: onRetryAudio) {
+                    Label("Tải lại bằng yt-dlp để lấy tiếng", systemImage: "waveform.badge.magnifyingglass")
                 }
             }
 
@@ -179,94 +235,47 @@ public struct TaskRowView: View {
         }
     }
 
-    private func fileIconName(for filename: String) -> String {
-        let ext = URL(fileURLWithPath: filename).pathExtension.lowercased()
-        switch ext {
-        case "mp4", "mkv", "mov", "avi", "webm", "ts": return "film"
-        case "mp3", "m4a", "flac", "wav", "aac": return "music.note"
-        case "zip", "rar", "7z", "tar", "gz", "bz2", "xz": return "doc.zipper"
-        case "dmg", "pkg", "iso", "app", "exe", "msi", "deb", "rpm", "appimage": return "shippingbox"
-        case "pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "txt", "rtf": return "doc.richtext"
-        case "jpg", "jpeg", "png", "webp", "gif", "svg": return "photo"
-        default: return "doc"
-        }
-    }
-
     @ViewBuilder
     private func statusBadge(_ status: TaskStatus) -> some View {
         switch status {
         case .downloading:
-            Text("Đang tải")
-                .font(.system(size: 10, weight: .semibold))
-                .foregroundColor(.blue)
-                .padding(.horizontal, 6)
-                .padding(.vertical, 2)
-                .background(Color.blue.opacity(0.12))
-                .cornerRadius(4)
+            pill("Đang tải", color: .blue)
         case .completed:
-            Text("Hoàn tất")
-                .font(.system(size: 10, weight: .semibold))
-                .foregroundColor(.green)
-                .padding(.horizontal, 6)
-                .padding(.vertical, 2)
-                .background(Color.green.opacity(0.12))
-                .cornerRadius(4)
+            pill("Hoàn tất", color: .green)
         case .paused:
-            Text("Tạm dừng")
-                .font(.system(size: 10, weight: .semibold))
-                .foregroundColor(.orange)
-                .padding(.horizontal, 6)
-                .padding(.vertical, 2)
-                .background(Color.orange.opacity(0.12))
-                .cornerRadius(4)
+            pill("Tạm dừng", color: .orange)
         case .failed:
-            Text("Lỗi")
-                .font(.system(size: 10, weight: .semibold))
-                .foregroundColor(.red)
-                .padding(.horizontal, 6)
-                .padding(.vertical, 2)
-                .background(Color.red.opacity(0.12))
-                .cornerRadius(4)
+            pill("Lỗi", color: .red)
         case .assembling:
-            Text("Đang ghép file")
-                .font(.system(size: 10, weight: .semibold))
-                .foregroundColor(.purple)
-                .padding(.horizontal, 6)
-                .padding(.vertical, 2)
-                .background(Color.purple.opacity(0.12))
-                .cornerRadius(4)
+            pill("Đang ghép file", color: .purple)
         case .needsConfirmation:
-            Text("Cần xác nhận file trong Chrome").font(.caption).foregroundColor(.orange)
+            // Pill thống nhất với các trạng thái khác (C-F16).
+            pill("Cần xác nhận file trong Chrome", color: .orange)
         case .pending:
-            Text("Chờ tải")
-                .font(.system(size: 10, weight: .semibold))
-                .foregroundColor(.secondary)
-                .padding(.horizontal, 6)
-                .padding(.vertical, 2)
-                .background(Color.secondary.opacity(0.12))
-                .cornerRadius(4)
+            pill("Chờ tải", color: .secondary)
         }
+    }
+
+    private func pill(_ text: String, color: Color) -> some View {
+        Text(text)
+            .font(.system(size: 10, weight: .semibold))
+            .foregroundColor(color)
+            .padding(.horizontal, 6)
+            .padding(.vertical, 2)
+            .background(color.opacity(0.12))
+            .cornerRadius(4)
+            .accessibilityLabel("Trạng thái: \(text)")
     }
 
     private var sizeAndProgressText: String {
         if task.status == .completed {
-            return formatBytes(task.totalBytes > 0 ? task.totalBytes : task.downloadedBytes)
+            return FileTypeHelper.formatBytes(task.totalBytes > 0 ? task.totalBytes : task.downloadedBytes)
         }
         if task.segmentsCount > 0 && task.downloadedSegmentsCount > 0 && task.status == .downloading {
-            let downloadedStr = formatBytes(task.downloadedBytes)
-            let totalStr = task.totalBytes > 0 ? " / ~" + formatBytes(task.totalBytes) : ""
+            let downloadedStr = FileTypeHelper.formatBytes(task.downloadedBytes)
+            let totalStr = task.totalBytes > 0 ? " / ~" + FileTypeHelper.formatBytes(task.totalBytes) : ""
             return "\(downloadedStr)\(totalStr) (\(task.downloadedSegmentsCount)/\(task.segmentsCount) phân đoạn)"
         }
-        return formatBytes(task.downloadedBytes) + (task.totalBytes > 0 ? " / " + formatBytes(task.totalBytes) : "")
-    }
-
-    private func formatBytes(_ bytes: Int64) -> String {
-        guard bytes > 0 else { return "0 B" }
-        return ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)
-    }
-
-    private func formatSpeed(_ bytesPerSec: Double) -> String {
-        let count = Int64(bytesPerSec)
-        return ByteCountFormatter.string(fromByteCount: count, countStyle: .file) + "/s"
+        return FileTypeHelper.formatBytes(task.downloadedBytes) + (task.totalBytes > 0 ? " / " + FileTypeHelper.formatBytes(task.totalBytes) : "")
     }
 }

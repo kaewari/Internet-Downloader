@@ -1,5 +1,7 @@
 # Danh sách 100 Nguồn Download Media từ 100 Website/Tên Miền Khác Nhau 100% (100% Verified Live)
 
+> **Tài liệu lịch sử** — bảng "Exactly 100 / ~9.14 GB" bên dưới là snapshot cũ (mô hình tải full). Danh sách chuẩn hiện tại là catalog 154 mục trong `scripts/media_sources_100.json`, báo cáo ở `docs/100_media_sources_report.md` (mô hình head+tail).
+
 > **Thông tin kiểm định tổng thể**:
 > - **Tổng số lượng nguồn:** Exactly 100 nguồn (100% Unique Hostnames / Tên miền máy chủ riêng biệt).
 > - **Dung lượng tối thiểu:** ≥ 10 MB / media (100% đạt chuẩn).

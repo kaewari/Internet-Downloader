@@ -11,6 +11,8 @@ public struct NewDownloadDialog: View {
     @State private var destinationFolder: URL = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first!
     @State private var segmentsCount: Int = 8
     @State private var errorMessage: String?
+    /// Dirty-flag: đã chạm tay vào tên file thì không auto-ghi đè từ URL nữa (C-F9).
+    @State private var filenameManuallyEdited: Bool = false
 
     public init(
         isPresented: Binding<Bool>,
@@ -20,6 +22,24 @@ public struct NewDownloadDialog: View {
         self._isPresented = isPresented
         self._urlString = State(initialValue: initialURL ?? "")
         self.onAdd = onAdd
+    }
+
+    /// Lỗi tên file hiện tại (nil = hợp lệ). Trim + cấm rỗng/ký tự cấm (C-F9).
+    private var filenameValidationError: String? {
+        FileTypeHelper.filenameError(for: filename)
+    }
+
+    private var urlValidationError: String? {
+        let trimmed = urlString.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty { return "Vui lòng nhập URL." }
+        if URLNormalizer.normalize(trimmed) == nil {
+            return "Vui lòng nhập URL hợp lệ (HTTP, HTTPS hoặc Data URL)."
+        }
+        return nil
+    }
+
+    private var isFormValid: Bool {
+        urlValidationError == nil && filenameValidationError == nil
     }
 
     public var body: some View {
@@ -44,6 +64,14 @@ public struct NewDownloadDialog: View {
                     .foregroundColor(.secondary)
                 TextField("file.zip", text: $filename)
                     .textFieldStyle(RoundedBorderTextFieldStyle())
+                    .onChange(of: filename) { _ in
+                        filenameManuallyEdited = true
+                    }
+                if let ferr = filenameValidationError, !filename.isEmpty || filenameManuallyEdited {
+                    Text(ferr)
+                        .font(.caption)
+                        .foregroundColor(.red)
+                }
             }
 
             VStack(alignment: .leading, spacing: 6) {
@@ -102,6 +130,7 @@ public struct NewDownloadDialog: View {
                 }
                 .keyboardShortcut(.defaultAction)
                 .buttonStyle(.borderedProminent)
+                .disabled(!isFormValid)
             }
         }
         .padding(20)
@@ -124,6 +153,8 @@ public struct NewDownloadDialog: View {
     }
 
     private func autoPopulateFilename(from urlStr: String) {
+        // Tôn trọng tên user đã sửa tay (C-F9).
+        guard !filenameManuallyEdited else { return }
         if let url = URL(string: urlStr) {
             if let extracted = FileTypeDetector.extractFilename(from: url) {
                 self.filename = extracted
@@ -147,12 +178,17 @@ public struct NewDownloadDialog: View {
     }
 
     private func startDownload() {
-        guard let url = URLNormalizer.normalize(urlString) else {
-            errorMessage = "Vui lòng nhập URL hợp lệ (HTTP, HTTPS hoặc Data URL)."
+        guard let url = URLNormalizer.normalize(urlString.trimmingCharacters(in: .whitespacesAndNewlines)) else {
+            errorMessage = urlValidationError ?? "Vui lòng nhập URL hợp lệ (HTTP, HTTPS hoặc Data URL)."
+            return
+        }
+        let cleanFilename = filename.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let ferr = FileTypeHelper.filenameError(for: cleanFilename) {
+            errorMessage = ferr
             return
         }
 
-        onAdd(url, filename, destinationFolder, segmentsCount)
+        onAdd(url, cleanFilename, destinationFolder, segmentsCount)
         isPresented = false
     }
 }

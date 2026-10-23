@@ -474,8 +474,22 @@ final class NonMediaIntegrityTests: XCTestCase {
     }
 
     // 7. Live test: Download real public PDF document and verify macOS openability
+    // Yêu cầu IDM_RUN_LIVE=1 (tách live khỏi gate offline) + preflight HEAD/Range,
+    // skip thay vì fail khi mất mạng/rate-limit. Không copy vào Downloads/.
     func testDownloadRealPublicPDFAndVerifyOpenable() async throws {
+        guard ProcessInfo.processInfo.environment["IDM_RUN_LIVE"] == "1" else {
+            throw XCTSkip("Test live: chỉ chạy khi IDM_RUN_LIVE=1 (xem docs/IDEAS_BACKLOG.md E-I4).")
+        }
         let pdfURL = URL(string: "https://raw.githubusercontent.com/mozilla/pdf.js/master/examples/learning/helloworld.pdf")!
+        var preflight = URLRequest(url: pdfURL)
+        preflight.httpMethod = "HEAD"
+        preflight.timeoutInterval = 10
+        preflight.setValue("bytes=0-15", forHTTPHeaderField: "Range")
+        let (_, preflightResponse) = try await URLSession.shared.data(for: preflight)
+        let preflightStatus = (preflightResponse as? HTTPURLResponse)?.statusCode ?? 0
+        guard (200...299).contains(preflightStatus) || preflightStatus == 206 else {
+            throw XCTSkip("Preflight HEAD/Range tới \(pdfURL.host ?? "?") trả HTTP \(preflightStatus); bỏ qua test live (mất mạng/rate-limit).")
+        }
         let baseDownloads = FileManager.default.temporaryDirectory.appendingPathComponent("test_dl_nonmedia_\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: baseDownloads, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: baseDownloads) }
@@ -529,17 +543,25 @@ final class NonMediaIntegrityTests: XCTestCase {
 
         let fileData = try Data(contentsOf: targetFile)
         XCTAssertTrue(fileData.starts(with: "%PDF-".utf8), "Downloaded file must be valid PDF starting with %PDF-")
-
-        // Copy to persistent Downloads folder for user inspection
-        let persistentDestFolder = URL(fileURLWithPath: "/Users/hoangson/Projects/Internet-Downloader/Downloads/Documents")
-        try FileManager.default.createDirectory(at: persistentDestFolder, withIntermediateDirectories: true)
-        let persistentFile = persistentDestFolder.appendingPathComponent("helloworld.pdf")
-        try? FileManager.default.removeItem(at: persistentFile)
-        try FileManager.default.copyItem(at: targetFile, to: persistentFile)
     }
 
     // 8. Live test: Download real public ZIP archive and verify CRC32
+    // Yêu cầu IDM_RUN_LIVE=1 (tách live khỏi gate offline) + preflight HEAD/Range,
+    // skip thay vì fail khi mất mạng/rate-limit. Không copy vào Downloads/.
     func testDownloadRealPublicZIPAndVerifyOpenable() async throws {
+        guard ProcessInfo.processInfo.environment["IDM_RUN_LIVE"] == "1" else {
+            throw XCTSkip("Test live: chỉ chạy khi IDM_RUN_LIVE=1 (xem docs/IDEAS_BACKLOG.md E-I4).")
+        }
+        let zipURL = URL(string: "https://codeload.github.com/octocat/Hello-World/zip/refs/heads/master")!
+        var zipPreflight = URLRequest(url: zipURL)
+        zipPreflight.httpMethod = "HEAD"
+        zipPreflight.timeoutInterval = 10
+        zipPreflight.setValue("bytes=0-15", forHTTPHeaderField: "Range")
+        let (_, zipPreflightResponse) = try await URLSession.shared.data(for: zipPreflight)
+        let zipPreflightStatus = (zipPreflightResponse as? HTTPURLResponse)?.statusCode ?? 0
+        guard (200...299).contains(zipPreflightStatus) || zipPreflightStatus == 206 else {
+            throw XCTSkip("Preflight HEAD/Range tới \(zipURL.host ?? "?") trả HTTP \(zipPreflightStatus); bỏ qua test live (mất mạng/rate-limit).")
+        }
         final class SafeBox<T>: @unchecked Sendable {
             private let lock = NSLock()
             private var _val: T
@@ -550,7 +572,6 @@ final class NonMediaIntegrityTests: XCTestCase {
             }
         }
 
-        let zipURL = URL(string: "https://codeload.github.com/octocat/Hello-World/zip/refs/heads/master")!
         let baseDownloads = FileManager.default.temporaryDirectory.appendingPathComponent("test_dl_zip_\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: baseDownloads, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: baseDownloads) }
@@ -601,13 +622,6 @@ final class NonMediaIntegrityTests: XCTestCase {
         try unzipProc.run()
         unzipProc.waitUntilExit()
         XCTAssertEqual(unzipProc.terminationStatus, 0, "unzip -t must return 0 with no errors")
-
-        // Copy to persistent Downloads folder for user inspection
-        let persistentDestFolder = URL(fileURLWithPath: "/Users/hoangson/Projects/Internet-Downloader/Downloads/Compressed")
-        try FileManager.default.createDirectory(at: persistentDestFolder, withIntermediateDirectories: true)
-        let persistentFile = persistentDestFolder.appendingPathComponent("Hello-World-master.zip")
-        try? FileManager.default.removeItem(at: persistentFile)
-        try FileManager.default.copyItem(at: targetFile, to: persistentFile)
     }
 
     // 9. Test FileTypeDetector opaque identifier recognition
@@ -710,7 +724,7 @@ final class NonMediaIntegrityTests: XCTestCase {
 
         // Must extract the real filename from rscd query instead of the UUID path
         XCTAssertEqual(task.filename, "artcraft-launcher-0.2.1-macos-universal.dmg")
-        // Must save directly into /Users/hoangson/Downloads/artcraft-launcher-0.2.1-macos-universal.dmg
+        // Must save directly into ~/Downloads/artcraft-launcher-0.2.1-macos-universal.dmg
         XCTAssertEqual(task.destinationFolder.standardizedFileURL, userDownloads.standardizedFileURL)
         XCTAssertEqual(task.finalFilePath.path, userDownloads.appendingPathComponent("artcraft-launcher-0.2.1-macos-universal.dmg").path)
     }
@@ -761,9 +775,10 @@ final class NonMediaIntegrityTests: XCTestCase {
 
     // 14. Test user existing downloaded file on disk
     func testUserExistingDownloadedFileDetectionAndMountability() {
+        let userDownloads = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first!
         let candidates = [
-            URL(fileURLWithPath: "/Users/hoangson/Downloads/artcraft-launcher-0.2.1-macos-universal.dmg"),
-            URL(fileURLWithPath: "/Users/hoangson/Downloads/0051985e-a8eb-4dd4-b612-9aea80ca1b21")
+            userDownloads.appendingPathComponent("artcraft-launcher-0.2.1-macos-universal.dmg"),
+            userDownloads.appendingPathComponent("0051985e-a8eb-4dd4-b612-9aea80ca1b21")
         ]
         for fileURL in candidates where FileManager.default.fileExists(atPath: fileURL.path) {
             let detected = FileTypeDetector.detectExtension(fileURL: fileURL)

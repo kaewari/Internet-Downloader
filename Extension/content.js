@@ -8,11 +8,14 @@
   let interceptDownloadsEnabled = true;
   let showFloatingBarEnabled = true;
   let sniffImagesEnabled = true;
+  // Người dùng có thể chọn "Tự động bắt đầu tải trong app" (mặc định tắt).
+  let autoStartBrowserDownloads = false;
 
-  chrome.storage.local.get(["interceptDownloads", "showFloatingBar", "sniffImages"], (res) => {
+  chrome.storage.local.get(["interceptDownloads", "showFloatingBar", "sniffImages", "autoStartBrowserDownloads"], (res) => {
     if (res.interceptDownloads !== undefined) interceptDownloadsEnabled = Boolean(res.interceptDownloads);
     if (res.showFloatingBar !== undefined) showFloatingBarEnabled = res.showFloatingBar;
     if (res.sniffImages !== undefined) sniffImagesEnabled = res.sniffImages;
+    if (res.autoStartBrowserDownloads !== undefined) autoStartBrowserDownloads = Boolean(res.autoStartBrowserDownloads);
   });
 
   chrome.storage.onChanged.addListener((changes) => {
@@ -26,6 +29,9 @@
     if (changes.sniffImages) {
       sniffImagesEnabled = changes.sniffImages.newValue;
     }
+    if (changes.autoStartBrowserDownloads) {
+      autoStartBrowserDownloads = Boolean(changes.autoStartBrowserDownloads.newValue);
+    }
   });
 
   let currentBar = null;
@@ -38,13 +44,16 @@
   // ==========================================
   // In-Page IDM Floating Download Toast Card
   // ==========================================
-  function showDownloadToast(filename, url, status = "App đã nhận tác vụ") {
+  function showDownloadToast(filename, url, status = "App đã nhận tác vụ", options = {}) {
     // Chỉ hiển thị toast trên top frame chính, không hiển thị trong iframe con
     if (typeof window !== "undefined" && window.self !== window.top) return;
 
-    // Tránh hiển thị trùng lặp toast cho cùng một URL / file trong vòng 1.5 giây
+    // Tránh hiển thị trùng lặp toast cho cùng một URL / file trong vòng 1.5 giây.
+    // Toast kết quả của một click dùng {force:true} để không bị nuốt mất; mỗi
+    // click đã có guard riêng ở notifyForClick nên không sinh toast trùng.
     const now = Date.now();
-    if (showDownloadToast._lastToast &&
+    if (!options.force &&
+        showDownloadToast._lastToast &&
         showDownloadToast._lastToast.url === url &&
         showDownloadToast._lastToast.filename === filename &&
         (now - showDownloadToast._lastToast.time < 1500)) {
@@ -86,6 +95,11 @@
     toast.querySelector(".idm-toast-name").textContent = displayName;
     toast.querySelector(".idm-toast-name").title = displayName;
     toast.querySelector(".idm-toast-status").textContent = status;
+    if (options.kind === "error" || options.kind === "success") {
+      const badge = toast.querySelector(".idm-toast-badge");
+      if (badge) badge.textContent = options.kind === "error" ? "LỖI" : "THÀNH CÔNG";
+    }
+    if (options.kind === "error" && toast.style) toast.style.borderColor = "#ff9f0a";
     const closeBtn = toast.querySelector(".idm-toast-close");
     closeBtn.addEventListener("click", (e) => {
       e.stopPropagation();
@@ -358,14 +372,43 @@
   // ==========================================
   const browserHandles = new Set();
 
+  // Khớp host theo exact/suffix (không dùng includes): "x.com" khớp nhầm
+  // "netflix.com", "max.com"; "vimeo.com" khớp nhầm "evilvimeo.com".
+  function hostMatches(host, domain) {
+    return host === domain || host.endsWith("." + domain);
+  }
+
+  // Danh sách nền tảng — đồng bộ với URLNormalizer.swift (knownPlatforms).
+  const VIDEO_PLATFORM_DOMAINS = [
+    "youtube.com", "youtu.be",
+    "tiktok.com",
+    "facebook.com", "fb.watch", "fb.com",
+    "instagram.com", "threads.net",
+    "twitter.com", "x.com",
+    "vimeo.com",
+    "dailymotion.com",
+    "bilibili.com",
+    "twitch.tv",
+    "reddit.com",
+    "pinterest.com",
+    "pornhub.com",
+    "xvideos.com",
+    "spankbang.com",
+    "youporn.com",
+    "redtube.com",
+    "eporner.com",
+    // Phải khớp với `knownPlatforms` trong URLNormalizer.swift — test
+    // MediaSourceConfigTests kiểm tra quan hệ "danh sách Swift ⊂ danh sách JS".
+    "hentaivn.tv", "hentaivn.moe", "hentaivn.net", "hentaivn.fun",
+    "njav.tv", "njav.org",
+    "xnhau.com", "xnhau.net",
+    // Link rút gọn
+    "dai.ly", "b23.tv", "t.co", "v.redd.it", "redd.it"
+  ];
+
   function isVideoPlatform() {
     const host = (typeof window !== "undefined" && window.location ? window.location.hostname : "").toLowerCase();
-    const platforms = [
-      "youtube.com", "youtu.be", "tiktok.com", "facebook.com", "fb.watch", "fb.com",
-      "instagram.com", "threads.net", "twitter.com", "x.com", "vimeo.com", "dailymotion.com",
-      "bilibili.com", "twitch.tv", "reddit.com", "pinterest.com", "pornhub.com", "xvideos.com", "xnxx.com"
-    ];
-    return platforms.some(p => host.includes(p));
+    return VIDEO_PLATFORM_DOMAINS.some(p => hostMatches(host, p));
   }
 
   function isVideoWatchPage(url) {
@@ -377,37 +420,37 @@
       const path = parsed.pathname.toLowerCase();
       const search = parsed.search.toLowerCase();
 
-      if (host.includes("youtube.com")) {
+      if (hostMatches(host, "youtube.com")) {
         return path === "/watch" || path.startsWith("/shorts/") || path.startsWith("/live/") || search.includes("v=");
       }
-      if (host.includes("youtu.be")) return path.length > 1;
-      if (host.includes("facebook.com") || host.includes("fb.com") || host.includes("fb.watch")) {
-        if (host.includes("fb.watch")) return path.length > 1;
+      if (hostMatches(host, "youtu.be")) return path.length > 1;
+      if (hostMatches(host, "facebook.com") || hostMatches(host, "fb.com") || hostMatches(host, "fb.watch")) {
+        if (hostMatches(host, "fb.watch")) return path.length > 1;
         return path.includes("/watch") || path.includes("/reel/") || path.includes("/videos/") ||
-               path.includes("/video.php") || path.includes("/story.php") || search.includes("v=");
+               path.includes("/posts/") || path.includes("/video.php") || path.includes("/story.php") || search.includes("v=");
       }
-      if (host.includes("tiktok.com")) {
+      if (hostMatches(host, "tiktok.com")) {
         return path.includes("/video/") || path.startsWith("/v/");
       }
-      if (host.includes("instagram.com")) {
+      if (hostMatches(host, "instagram.com")) {
         return path.includes("/reel/") || path.includes("/reels/") || path.includes("/p/") || path.includes("/tv/");
       }
-      if (host.includes("twitter.com") || host.includes("x.com")) {
+      if (hostMatches(host, "twitter.com") || hostMatches(host, "x.com")) {
         return path.includes("/status/");
       }
-      if (host.includes("reddit.com")) {
-        return path.includes("/comments/") || host.includes("v.redd.it");
+      if (hostMatches(host, "reddit.com")) {
+        return path.includes("/comments/");
       }
-      if (host.includes("redd.it")) {
+      if (hostMatches(host, "v.redd.it") || hostMatches(host, "redd.it")) {
         return path.length > 1;
       }
-      if (host.includes("vimeo.com")) {
+      if (hostMatches(host, "vimeo.com")) {
         return /\/\d+/.test(path) || path.includes("player");
       }
-      if (host.includes("dailymotion.com")) {
+      if (hostMatches(host, "dailymotion.com")) {
         return path.includes("/video/");
       }
-      if (host.includes("bilibili.com")) {
+      if (hostMatches(host, "bilibili.com")) {
         return path.includes("/video/");
       }
       return false;
@@ -423,7 +466,7 @@
       const host = u.hostname.toLowerCase();
       const path = u.pathname.replace(/\/+$/, "").toLowerCase();
       const platforms = ["facebook.com", "fb.com", "youtube.com", "tiktok.com", "instagram.com", "twitter.com", "x.com", "reddit.com", "vimeo.com", "dailymotion.com", "bilibili.com"];
-      if (!platforms.some(p => host.includes(p))) return false;
+      if (!platforms.some(p => hostMatches(host, p))) return false;
       if (!path || path === "" || path === "/" || path === "/home" || path === "/feed" || path === "/foryou" || path === "/explore") {
         return !u.searchParams.has("v");
       }
@@ -439,7 +482,7 @@
       const host = (typeof window !== "undefined" && window.location ? window.location.hostname : "").toLowerCase();
 
       // Facebook Feed / Groups / Page
-      if (host.includes("facebook.com") || host.includes("fb.com")) {
+      if (hostMatches(host, "facebook.com") || hostMatches(host, "fb.com")) {
         const post = targetEl.closest(
           "div[role='article'], div[data-pagelet*='FeedUnit'], div[role='feed'] > div, div[data-virtualized], div[data-visualcompletion='ignore-dynamic-view']"
         );
@@ -459,7 +502,7 @@
       }
 
       // YouTube Feed / Browse / Channel / Shorts Shelf
-      if (host.includes("youtube.com")) {
+      if (hostMatches(host, "youtube.com")) {
         const item = targetEl.closest(
           "ytd-rich-item-renderer, ytd-video-renderer, ytd-grid-video-renderer, ytd-compact-video-renderer, ytd-reel-item-renderer, ytd-playlist-video-renderer"
         );
@@ -470,7 +513,7 @@
       }
 
       // TikTok Feed / Profile
-      if (host.includes("tiktok.com")) {
+      if (hostMatches(host, "tiktok.com")) {
         const item = targetEl.closest("[data-e2e='feed-item'], [data-e2e='recommend-list-item-container'], [data-e2e='user-post-item']");
         if (item) {
           const link = item.querySelector("a[href*='/video/']");
@@ -479,7 +522,7 @@
       }
 
       // Twitter / X Timeline
-      if (host.includes("twitter.com") || host.includes("x.com")) {
+      if (hostMatches(host, "twitter.com") || hostMatches(host, "x.com")) {
         const article = targetEl.closest("article");
         if (article) {
           const link = article.querySelector("a[href*='/status/']");
@@ -488,7 +531,7 @@
       }
 
       // Instagram Feed / Explore
-      if (host.includes("instagram.com")) {
+      if (hostMatches(host, "instagram.com")) {
         const post = targetEl.closest("article, div[role='dialog']");
         if (post) {
           const link = post.querySelector("a[href*='/p/'], a[href*='/reel/']");
@@ -497,7 +540,7 @@
       }
 
       // Reddit Feed / Subreddit
-      if (host.includes("reddit.com")) {
+      if (hostMatches(host, "reddit.com")) {
         const post = targetEl.closest("shreddit-post, [data-testid='post-container']");
         if (post) {
           const link = post.querySelector("a[slot='full-post-link'], a[data-click-id='body'], a[href*='/comments/']");
@@ -530,6 +573,84 @@
     if (!streams || !streams.length) return null;
     const bestUrl = getBestStreamFromRecent(streams);
     return streams.find(s => s && s.url === bestUrl) || streams[0];
+  }
+
+  // ==========================================
+  // Handoff feedback: mã lỗi app, URL không dùng được, watchdog
+  // ==========================================
+  // Mã lỗi do app/native host trả về (IPCResponse.extra.code) → thông điệp
+  // tiếng Việt có hành động cụ thể. Giữ nguyên các chuỗi cũ ở nơi đã tốt.
+  const DOWNLOAD_ERROR_MESSAGES = {
+    protocol_mismatch: "App và extension khác phiên bản — cập nhật cả hai rồi thử lại",
+    browser_source_required: "Nguồn này chỉ tải được qua Chrome — hãy dùng nút Save của extension",
+    invalid_url: "Không tìm thấy link media hợp lệ — hãy bấm phát video rồi thử lại",
+    app_not_running: "Chưa kết nối được App — hãy mở Internet Downloader rồi thử lại",
+    bad_request: "App không nhận được yêu cầu — hãy mở Internet Downloader rồi thử lại",
+    native_host_error: "App từ chối tác vụ — hãy mở Internet Downloader rồi thử lại",
+    source_changed: "Mục đã thay đổi — hãy chọn lại mục rồi thử lại",
+    browser_reconnect: "Trang đã thay đổi — hãy chọn lại mục rồi thử lại",
+    browser_source: "Nguồn này chỉ tải được qua Chrome — hãy dùng nút Save của extension"
+  };
+  const APP_NOT_RUNNING_MESSAGE = DOWNLOAD_ERROR_MESSAGES.app_not_running;
+  const NO_MEDIA_SOURCE_MESSAGE = "Chưa bắt được luồng media — hãy bấm phát video trên trang rồi thử lại";
+  const APP_NO_RESPONSE_MESSAGE = "App không phản hồi — hãy mở Internet Downloader rồi thử lại";
+  const WATCHDOG_TIMEOUT_MS = 12000;
+
+  // blob:/data: chỉ tồn tại trong trang, app không thể tải — tuyệt đối không gửi.
+  // (dispatchDownload tự kiểm tra inline để giữ nguyên khả năng test tách rời.)
+
+  // D-F15: helper watchdog dùng chung cho sendDownloadHandoff + dispatchDownload.
+  // Phản hồi sau timeout (stale) bị bỏ qua, không tạo toast thứ hai.
+  function createHandoffWatchdog(timeoutMs, onTimeout) {
+    let settled = false;
+    let timer = null;
+    const disarm = () => {
+      if (timer !== null && typeof clearTimeout === "function") {
+        try { clearTimeout(timer); } catch (_) {}
+      }
+      timer = null;
+    };
+    if (typeof setTimeout === "function") {
+      timer = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        timer = null;
+        onTimeout();
+      }, timeoutMs);
+    }
+    return {
+      isSettled: () => settled,
+      succeed: (fn) => {
+        if (settled) return false;
+        settled = true;
+        disarm();
+        fn();
+        return true;
+      }
+    };
+  }
+
+  function mapDownloadError(response) {
+    const code = response && response.code;
+    const known = code && DOWNLOAD_ERROR_MESSAGES[code];
+    if (known) return known;
+    const fallback = (response && response.error) || "App chưa nhận tác vụ";
+    // Mã lạ: GIỮ mã trong thông điệp để người dùng/lead debug được.
+    return code ? `${fallback} (mã: ${code})` : fallback;
+  }
+
+  // Gửi một yêu cầu tải kèm watchdog 12s: không có phản hồi/taskId thì luôn có
+  // toast thay vì im lặng. Dùng cho các nút không nằm trong floating bar.
+  function sendDownloadHandoff({ url, filename, referrer, autoStart }, onResult) {
+    // D-F15: qua helper dùng chung (stale → bỏ qua).
+    const watchdog = createHandoffWatchdog(WATCHDOG_TIMEOUT_MS, () => onResult({ timedOut: true, response: null, lastError: null }));
+    try {
+      chrome.runtime.sendMessage({ action: "download_media", url, filename, referrer, autoStart: autoStart === true }, (response) => {
+        watchdog.succeed(() => onResult({ timedOut: false, response, lastError: chrome.runtime.lastError || null }));
+      });
+    } catch (error) {
+      watchdog.succeed(() => onResult({ timedOut: false, response: null, lastError: { message: error && error.message } }));
+    }
   }
 
   function createFloatingBar(targetEl, media) {
@@ -579,17 +700,61 @@
           bar.dataset.browserHandle = selection.handle;
           browserHandles.add(selection.handle);
           chrome.runtime.sendMessage({action: "browser_start", selection}, response => {
-            if (chrome.runtime.lastError || !response?.success || !response.taskId) setStatus(response?.error || chrome.runtime.lastError?.message || "App chưa nhận tác vụ");
+            if (chrome.runtime.lastError || !response?.success || !response.taskId) {
+              // Bar có thể bị gỡ ngay sau click → luôn toast để không "im lặng".
+              const message = chrome.runtime.lastError
+                ? (typeof APP_NOT_RUNNING_MESSAGE === "string" ? APP_NOT_RUNNING_MESSAGE : "Chưa kết nối được App — hãy mở Internet Downloader rồi thử lại")
+                : (typeof mapDownloadError === "function" ? mapDownloadError(response) : (response?.error || "App chưa nhận tác vụ"));
+              setStatus(message);
+              if (typeof showDownloadToast === "function") showDownloadToast(filename, null, message, { force: true, kind: "error" });
+            } else {
+              // Các phase accepted/completed/failed sẽ toast qua message browser_phase.
+              setStatus("App đã nhận tác vụ");
+            }
           });
         } catch (error) {
-          setStatus(window.__idmBrowser.errorMessage(error.message));
+          const message = window.__idmBrowser.errorMessage(error.message);
+          setStatus(message);
+          if (typeof showDownloadToast === "function") showDownloadToast(filename, null, message, { force: true, kind: "error" });
         }
         return;
       }
 
+      // Trạng thái phản hồi của click hiện tại: mỗi click chỉ hiện đúng MỘT
+      // toast kết quả, và phản hồi/watchdog đến muộn bị bỏ qua (không toast cũ).
+      const clickState = { toastShown: false };
+
+      // Toast khi không có nguồn media nào dùng được — luôn nói rõ phải làm gì.
+      function notifyMissingSource() {
+        const message = typeof NO_MEDIA_SOURCE_MESSAGE === "string"
+          ? NO_MEDIA_SOURCE_MESSAGE
+          : "Chưa bắt được luồng media — hãy bấm phát video trên trang rồi thử lại";
+        setStatus(message);
+        if (clickState.toastShown) return;
+        clickState.toastShown = true;
+        if (typeof showDownloadToast === "function") showDownloadToast(filename, null, message, { force: true, kind: "error" });
+      }
+
       function dispatchDownload(downloadUrl, streamReferrer) {
+        const notify = typeof showDownloadToast === "function" ? showDownloadToast : () => null;
         let ref = streamReferrer || (typeof downloadUrl === "object" ? downloadUrl.referrer : null);
         const targetUrl = (typeof downloadUrl === "object" ? downloadUrl.url : downloadUrl);
+        const autoStart = typeof autoStartBrowserDownloads !== "undefined" && autoStartBrowserDownloads === true;
+        const mapError = typeof mapDownloadError === "function"
+          ? mapDownloadError
+          : response => (response && response.error) || "App chưa nhận tác vụ";
+        const noResponseMessage = typeof APP_NO_RESPONSE_MESSAGE === "string"
+          ? APP_NO_RESPONSE_MESSAGE
+          : "App không phản hồi — hãy mở Internet Downloader rồi thử lại";
+        const notRunningMessage = typeof APP_NOT_RUNNING_MESSAGE === "string"
+          ? APP_NOT_RUNNING_MESSAGE
+          : "Chưa kết nối được App — hãy mở Internet Downloader rồi thử lại";
+        const noSourceMessage = typeof NO_MEDIA_SOURCE_MESSAGE === "string"
+          ? NO_MEDIA_SOURCE_MESSAGE
+          : "Chưa bắt được luồng media — hãy bấm phát video trên trang rồi thử lại";
+        const watchdogMs = typeof WATCHDOG_TIMEOUT_MS === "number" ? WATCHDOG_TIMEOUT_MS : 12000;
+        // Khi được test trích riêng, clickState có thể không tồn tại → state cục bộ.
+        const click = (typeof clickState === "object" && clickState) ? clickState : { toastShown: false };
 
         if (media && media.isIframeEmbed && media.embedSrc) {
           ref = media.embedSrc;
@@ -599,12 +764,51 @@
           ref = window.location.href;
         }
 
-        chrome.runtime.sendMessage({action: "download_media", url: targetUrl, filename, referrer: ref}, response => {
-          if (chrome.runtime.lastError || !response?.success || !response.taskId) {
-            setStatus(response?.error || chrome.runtime.lastError?.message || "App chưa nhận tác vụ"); return;
-          }
-          setStatus("App đã nhận tác vụ");
-        });
+        function finish(message, kind) {
+          setStatus(message);
+          if (click.toastShown) return;
+          click.toastShown = true;
+          notify(filename, typeof targetUrl === "string" && targetUrl.length > 0 ? targetUrl : null, message, { force: true, kind: kind });
+        }
+
+        // blob:/data: chỉ tồn tại trong trang — app không thể tải. Không bao giờ gửi.
+        const usableUrl = typeof targetUrl === "string" && targetUrl.length > 0 &&
+          !targetUrl.startsWith("blob:") && !targetUrl.startsWith("data:");
+        if (!usableUrl) {
+          finish(noSourceMessage, "error");
+          return;
+        }
+
+        // Watchdog 12s: app không trả taskId thì vẫn phải có toast thay vì im lặng.
+        // D-F15: qua helper dùng chung — phản hồi đến sau watchdog (stale)
+        // không được tạo toast thứ hai.
+        // Guard typeof: helper nằm ngoài slice BAR_CODE khi test trích riêng.
+        const watchdog = typeof createHandoffWatchdog === "function"
+          ? createHandoffWatchdog(watchdogMs, () => finish(noResponseMessage, "error"))
+          : null;
+        const handleResponse = (response) => {
+          const run = () => {
+            if (chrome.runtime.lastError) {
+              finish(notRunningMessage, "error");
+              return;
+            }
+            if (response && response.success === true && response.taskId) {
+              finish(autoStart ? "App đã bắt đầu tải" : "App đã nhận tác vụ — chờ xác nhận trong app", "success");
+              return;
+            }
+            finish(mapError(response), "error");
+          };
+          if (watchdog) watchdog.succeed(run);
+          else run();
+        };
+        try {
+          chrome.runtime.sendMessage({action: "download_media", url: targetUrl, filename, referrer: ref, autoStart}, handleResponse);
+        } catch (error) {
+          // Extension vừa bị reload/invalidate — vẫn phải báo cho người dùng.
+          // D-F15: helper disarm watchdog, stale không toast trùng.
+          if (watchdog) watchdog.succeed(() => finish(notRunningMessage, "error"));
+          else finish(notRunningMessage, "error");
+        }
       }
 
       // 1. Nền tảng video trực tuyến (YouTube, TikTok, Facebook,...):
@@ -637,8 +841,7 @@
           if (bgResolved) {
             dispatchDownload(bgResolved.url, bgResolved.referrer);
           } else {
-            setStatus("Vui lòng bấm phát video để bắt link");
-            showDownloadToast("Vui lòng bấm phát video để ứng dụng bắt luồng media.", "info");
+            notifyMissingSource();
           }
         });
         return;
@@ -670,8 +873,7 @@
         if (bgResolved) {
           dispatchDownload(bgResolved.url, bgResolved.referrer);
         } else {
-          setStatus("Vui lòng bấm phát video để bắt link");
-          showDownloadToast("Vui lòng bấm phát video để ứng dụng bắt luồng media.", "info");
+          notifyMissingSource();
         }
       });
 
@@ -712,7 +914,9 @@
   chrome.runtime.onMessage.addListener(message => {
     if (message.action === "browser_phase" && browserHandles.has(message.handle)) {
       if (currentBar?.dataset.browserHandle === message.handle) currentBar.querySelector("span").textContent = message.message;
-      if (["accepted", "needs_confirmation", "completed", "failed"].includes(message.phase)) showDownloadToast("Attachment Telegram", null, message.message + (message.phase === "completed" ? " · " + message.verification : ""));
+      // D-F14: chỉ toast phase terminal — accepted (trung gian) chỉ đổi trạng
+      // thái bar; needs_confirmation cần user hành động nên giữ toast.
+      if (["needs_confirmation", "completed", "failed"].includes(message.phase)) showDownloadToast("Attachment Telegram", null, message.message + (message.phase === "completed" && message.verification ? " · " + message.verification : ""), { force: true, kind: message.phase === "failed" ? "error" : message.phase === "completed" ? "success" : undefined });
       if (["completed", "failed"].includes(message.phase)) browserHandles.delete(message.handle);
     }
   });
@@ -835,8 +1039,52 @@
     }
   }
 
+  // D-F13: MIME-allowlist phía content (mirror background) + sniff query-param
+  // (?format=/?mime=/?ext= cho download.php/v2.0/download không đuôi file).
+  function isAllowedStreamMime(mimeValue) {
+    if (mimeValue === undefined || mimeValue === null || mimeValue === "") return true;
+    const clean = String(mimeValue).toLowerCase().split(";")[0].trim();
+    if (!clean) return true;
+    if (/^(video|audio)\//.test(clean)) return true;
+    if (clean.includes("mpegurl") || clean.includes("dash+xml") || clean.includes("ms-sstr")) return true;
+    if (clean === "application/octet-stream") return true;
+    return false;
+  }
+  function extFromMediaQueryParams(urlStr) {
+    if (!urlStr || typeof urlStr !== "string") return "";
+    try {
+      const u = new URL(urlStr, window.location.href);
+      const pick = (names) => {
+        for (const n of names) {
+          const v = u.searchParams.get(n);
+          if (v) return v;
+        }
+        return "";
+      };
+      const fmt = (pick(["format", "ext", "extension"]) || "").toLowerCase().trim();
+      if (/^(mp4|webm|mkv|mov|m3u8|mpd|m4s|ts|mp3|m4a|aac|flac|wav|ogg|ogv|oga)$/.test(fmt)) return "." + fmt;
+      const mt = (pick(["mime", "mimetype", "content-type", "type"]) || "").toLowerCase().trim();
+      const m = mt.match(/^(video|audio)\/([a-z0-9+.-]+)/);
+      if (m) {
+        const sub = m[2];
+        if (sub.includes("mpegurl") || sub === "x-mpegurl") return ".m3u8";
+        if (sub.includes("dash")) return ".mpd";
+        if (sub === "mp4" || sub === "webm") return "." + sub;
+        if (m[1] === "video") return ".mp4";
+        if (m[1] === "audio") return sub === "ogg" ? ".ogg" : ".m4a";
+      }
+    } catch (_) {}
+    return "";
+  }
   function addUniqueRecentStream(item) {
     if (!item || !item.url || isChunkOrMseStreamUrl(item.url)) return;
+    // MIME lạ đã rõ (json/text/html...) và không có tín hiệu media nào
+    // (đuôi file/query-param) → loại, tránh làm loãng danh sách.
+    if (!isAllowedStreamMime(item.mime)) {
+      const pathOnly = String(item.url).split("?")[0].split("#")[0].toLowerCase();
+      const hasMediaExt = /\.(mp4|webm|mkv|mov|m3u8|mpd|m4s|ts|mp3|m4a|aac|flac|wav|ogg|ogv)($|#)/i.test(pathOnly);
+      if (!hasMediaExt && !extFromMediaQueryParams(item.url)) return;
+    }
     const key = normalizeStreamUrlKey(item.url);
     if (recentStreams.some(s => s.url === item.url || normalizeStreamUrlKey(s.url) === key)) return;
     recentStreams.unshift(item);
@@ -1054,15 +1302,25 @@
     event.preventDefault();
     event.stopPropagation();
 
-    chrome.runtime.sendMessage({
-      action: "download_media",
+    sendDownloadHandoff({
       url: info.url,
       filename: info.filename,
-      referrer: location.href
-    }, (response) => {
-      if (chrome.runtime.lastError || !response?.success || !response.taskId) {
-        showDownloadToast(info.filename, info.url, response?.error || "Không kết nối được App — hãy mở Internet Downloader");
+      referrer: location.href,
+      autoStart: autoStartBrowserDownloads === true
+    }, ({ timedOut, response, lastError }) => {
+      if (timedOut) {
+        showDownloadToast(info.filename, info.url, APP_NO_RESPONSE_MESSAGE, { force: true, kind: "error" });
+        return;
       }
+      if (lastError) {
+        showDownloadToast(info.filename, info.url, APP_NOT_RUNNING_MESSAGE, { force: true, kind: "error" });
+        return;
+      }
+      if (response && response.success === true && response.taskId) {
+        showDownloadToast(info.filename, info.url, "App đã nhận tác vụ — chờ xác nhận trong app", { force: true, kind: "success" });
+        return;
+      }
+      showDownloadToast(info.filename, info.url, mapDownloadError(response), { force: true, kind: "error" });
     });
   }, true);
 
@@ -1075,7 +1333,7 @@
       else openBatchGrabberModal();
     } else if (req.action === "show_download_toast") {
       if (typeof window !== "undefined" && window.self !== window.top) return;
-      showDownloadToast(req.filename, req.url);
+      showDownloadToast(req.filename, req.url, req.error ? "Không chuyển được sang app — tải tiếp trong trình duyệt" : undefined);
     } else if (req.action === "media_stream_detected") {
       if (req.mediaItem) {
         addUniqueRecentStream(req.mediaItem);
@@ -1212,14 +1470,18 @@
     });
 
     // 4. Quét tất cả liên kết file download
+    // D-F13: thêm sniff query-param (?format=mp4/?mime=video/mp4/?ext=m3u8)
+    // cho download.php/v2.0/download không có đuôi file.
     document.querySelectorAll("a[href]").forEach((a) => {
       const href = a.href;
       if (href) {
         const ext = href.split("?")[0].split(".").pop().toLowerCase();
-        if (["zip", "rar", "7z", "dmg", "pkg", "iso", "pdf", "mp4", "mkv", "mp3", "tar", "gz", "exe"].includes(ext)) {
+        const qext = typeof extFromMediaQueryParams === "function" ? extFromMediaQueryParams(href).replace(/^\./, "") : "";
+        const effExt = ["zip", "rar", "7z", "dmg", "pkg", "iso", "pdf", "mp4", "mkv", "mp3", "tar", "gz", "exe"].includes(ext) ? ext : qext;
+        if (["zip", "rar", "7z", "dmg", "pkg", "iso", "pdf", "mp4", "mkv", "mp3", "tar", "gz", "exe", "m3u8", "mpd", "webm", "mov", "m4a", "wav", "flac"].includes(effExt)) {
           let itemType = "file";
-          if (["mp4", "mkv"].includes(ext)) itemType = "video";
-          else if (["mp3"].includes(ext)) itemType = "audio";
+          if (["mp4", "mkv", "webm", "mov", "m3u8", "mpd"].includes(effExt)) itemType = "video";
+          else if (["mp3", "m4a", "wav", "flac"].includes(effExt)) itemType = "audio";
           addMediaItem({
             url: href,
             name: (a.innerText || "").trim() || href.split("/").pop().split("?")[0] || "file",

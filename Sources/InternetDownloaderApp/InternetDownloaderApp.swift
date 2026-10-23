@@ -21,6 +21,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApplication.shared.terminate(nil)
     }
 
+    /// Đóng window khi còn downloading/pending → hỏi, không terminate ngay (C-F4).
     @objc private func handleWindowWillClose(_ notification: Notification) {
         guard !isTerminating, let window = notification.object as? NSWindow else { return }
         let mainWindowStyle: NSWindow.StyleMask = [.titled, .closable, .miniaturizable, .resizable]
@@ -28,12 +29,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             for sheet in window.sheets {
                 window.endSheet(sheet)
             }
+            let hasActive = DownloadManager.shared.getAllTasks().contains {
+                $0.status == .downloading || $0.status == .pending
+            }
+            if hasActive {
+                let alert = NSAlert()
+                alert.messageText = "Vẫn còn tác vụ đang tải"
+                alert.informativeText = "Đóng cửa sổ sẽ giữ ứng dụng chạy nền (menu bar) để tiếp tục tải. Chọn “Thoát ngay” để dừng mọi lượt tải."
+                alert.addButton(withTitle: "Giữ chạy nền")
+                alert.addButton(withTitle: "Thoát ngay")
+                alert.alertStyle = .warning
+                let response = alert.runModal()
+                guard response == .alertSecondButtonReturn else { return }
+            }
             terminateApplication()
         }
     }
 
+    /// Giữ app sống (menu bar + tải nền) sau khi đóng window; thoát tường minh
+    /// qua nút Thoát / alert xác nhận (C-F4).
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
-        return true
+        return false
     }
 
     func applicationWillTerminate(_ notification: Notification) {
@@ -61,9 +77,17 @@ struct InternetDownloaderApp: App {
                 Text("Internet Downloader")
                     .font(.headline)
 
-                let downloadingCount = viewModel.tasks.filter { $0.status == .downloading }.count
-                Text("Đang tải: \(downloadingCount) tác vụ")
-                    .font(.caption)
+                // Đọc progress/speed đã throttle 3Hz từ ViewModel (C-F15).
+                if viewModel.cachedDownloadingCount > 0 {
+                    Text("Đang tải: \(viewModel.cachedDownloadingCount) tác vụ · \(Int((viewModel.cachedOverallProgress * 100).rounded()))%")
+                        .font(.caption)
+                    Text("Tốc độ: \(FileTypeHelper.formatSpeed(viewModel.cachedAggregateSpeed))")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                } else {
+                    Text("Đang tải: 0 tác vụ")
+                        .font(.caption)
+                }
 
                 Divider()
 

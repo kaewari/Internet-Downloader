@@ -1,5 +1,7 @@
 # Plan v2 — sửa Telegram trong Internet Downloader
 
+> **Snapshot cho 1.1.0/1.3.0** — tài liệu này là snapshot lịch sử tại thời điểm app 1.1.0 / extension 1.3.0 / browser protocol 2 (chốt 2026-10-10). Source hiện tại đã ở app 1.2.0 / extension 1.4.0; không dùng số phiên bản trong này để đối chiếu release hiện tại.
+
 Plan được người dùng chốt ngày 2026-10-10. Phạm vi hiện tại là `/Users/hoangson/Projects/Internet-Downloader`, giữ app macOS và nút “Tải video này”. Lưu/Video_Downloader chỉ là nguồn tham khảo logic lựa chọn và canary, không là giao diện bàn giao cho bản sửa này.
 
 ## Mục tiêu

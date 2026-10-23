@@ -4,6 +4,9 @@ import DownloaderCore
 public struct MainWindow: View {
     @ObservedObject public var viewModel: DownloadManagerViewModel
     @State private var taskForRefreshAddress: DownloadTask? = nil
+    @State private var showDeleteSelectedConfirm: Bool = false
+    /// Id của sheet needsConfirmation đang hiển thị, để onDismiss dọn orphan (C-F8).
+    @State private var presentedConfirmationId: UUID? = nil
 
     public init(viewModel: DownloadManagerViewModel) {
         self.viewModel = viewModel
@@ -11,14 +14,14 @@ public struct MainWindow: View {
 
     public var body: some View {
         NavigationSplitView {
-            // Sidebar
+            // Sidebar (count đọc từ cache 1-pass, C-F12)
             List(DownloadCategory.allCases, selection: $viewModel.selectedCategory) { category in
                 NavigationLink(value: category) {
                     Label {
                         HStack {
                             Text(category.rawValue)
                             Spacer()
-                            Text("\(count(for: category))")
+                            Text("\(viewModel.cachedCount(for: category))")
                                 .font(.caption2)
                                 .foregroundColor(.secondary)
                         }
@@ -30,8 +33,33 @@ public struct MainWindow: View {
             .navigationSplitViewColumnWidth(min: 160, ideal: 180, max: 240)
         } detail: {
             VStack(spacing: 0) {
-                // Task List
-                if viewModel.filteredTasks.isEmpty {
+                // Error banner tập trung (C-F6)
+                if let banner = viewModel.errorBanner {
+                    HStack(spacing: 8) {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .foregroundColor(.red)
+                        Text(banner)
+                            .font(.callout)
+                            .lineLimit(2)
+                        Spacer()
+                        Button {
+                            viewModel.dismissErrorBanner()
+                        } label: {
+                            Image(systemName: "xmark.circle.fill")
+                                .foregroundColor(.secondary)
+                        }
+                        .buttonStyle(.plain)
+                        .help("Đóng thông báo lỗi")
+                        .accessibilityLabel("Đóng thông báo lỗi")
+                    }
+                    .padding(8)
+                    .background(Color.red.opacity(0.12))
+                    .cornerRadius(8)
+                    .padding([.top, .horizontal], 8)
+                }
+
+                // Task List (C-F10: List(selection:) native thay onTapGesture)
+                if viewModel.cachedFilteredTasks.isEmpty {
                     VStack(spacing: 12) {
                         Image(systemName: "arrow.down.circle")
                             .font(.system(size: 48))
@@ -46,8 +74,8 @@ public struct MainWindow: View {
                     }
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                 } else {
-                    List {
-                        ForEach(viewModel.filteredTasks) { task in
+                    List(selection: $viewModel.selectedTaskId) {
+                        ForEach(viewModel.cachedFilteredTasks) { task in
                             TaskRowView(
                                 task: task,
                                 isSelected: viewModel.selectedTaskId == task.id,
@@ -56,15 +84,19 @@ public struct MainWindow: View {
                                 onDelete: { viewModel.deleteTask(task.id) },
                                 onOpen: { viewModel.openFile(task) },
                                 onReveal: { viewModel.revealInFinder(task) },
-                                onRefreshAddress: { taskForRefreshAddress = task }
+                                onRefreshAddress: { taskForRefreshAddress = task },
+                                onRetryAudio: { viewModel.retryAudioRepair(task.id) }
                             )
-                            .contentShape(Rectangle())
-                            .onTapGesture {
-                                viewModel.selectTask(task.id)
-                            }
+                            .tag(task.id)
                         }
                     }
                     .listStyle(.inset(alternatesRowBackgrounds: true))
+                    .onChange(of: viewModel.selectedTaskId) { newId in
+                        // Native selection (chuột/bàn phím/VoiceOver) → nạp segments.
+                        if let id = newId {
+                            viewModel.selectTask(id)
+                        }
+                    }
                 }
 
                 // Bottom IDM Segment Visualizer Panel
@@ -97,12 +129,29 @@ public struct MainWindow: View {
                     .help("Tiếp tục tất cả tác vụ đã tạm dừng hoặc bị lỗi")
                     .disabled(!viewModel.tasks.contains(where: { $0.status == .paused || $0.status == .failed || $0.status == .pending }))
 
-                    Button(action: { viewModel.performToolbarCleanup() }) {
-                        Label("Dọn dẹp danh sách", systemImage: "trash.slash")
+                    // C-F7: tách nút Dọn dẹp 2 nghĩa thành 2 action rõ ràng.
+                    Button(action: { viewModel.clearCompletedAndFailedTasks() }) {
+                        Label("Dọn dẹp hoàn tất/lỗi", systemImage: "trash.slash")
                     }
-                    .help("Dọn dẹp tác vụ hoàn tất/lỗi hoặc xóa tác vụ đang chọn")
-                    .disabled(viewModel.tasks.isEmpty)
+                    .help("Xóa các tác vụ đã hoàn tất hoặc bị lỗi")
+                    .disabled(!viewModel.hasCompletedOrFailed)
+
+                    Button(action: { showDeleteSelectedConfirm = true }) {
+                        Label("Xóa mục đã chọn", systemImage: "trash")
+                    }
+                    .help("Xóa tác vụ đang chọn")
+                    .disabled(viewModel.selectedTaskId == nil)
                 }
+            }
+            .alert("Xóa tác vụ đang chọn?", isPresented: $showDeleteSelectedConfirm) {
+                Button("Hủy", role: .cancel) {}
+                Button("Xóa", role: .destructive) {
+                    if let id = viewModel.selectedTaskId {
+                        viewModel.deleteTask(id)
+                    }
+                }
+            } message: {
+                Text("Tác vụ đã chọn sẽ bị xóa khỏi danh sách. File đã tải xong vẫn giữ nguyên trên đĩa.")
             }
         }
         .sheet(isPresented: $viewModel.showNewDownloadSheet) {
@@ -125,7 +174,13 @@ public struct MainWindow: View {
                 viewModel.updateTaskURL(taskId: task.id, newURL: newURL, newReferrer: newReferrer)
             }
         }
-        .sheet(item: $viewModel.pendingConfirmationTask) { task in
+        .sheet(item: $viewModel.pendingConfirmationTask, onDismiss: {
+            // ESC dismiss không gọi onCancel → dọn task needsConfirmation mồ côi (C-F8).
+            if let id = presentedConfirmationId {
+                presentedConfirmationId = nil
+                viewModel.handleConfirmationDismiss(taskId: id)
+            }
+        }) { task in
             DownloadConfirmationDialog(
                 task: task,
                 onStart: { filename, folder, segs, probedSize in
@@ -135,26 +190,9 @@ public struct MainWindow: View {
                     viewModel.cancelPendingConfirmation(task.id)
                 }
             )
+            .onAppear {
+                presentedConfirmationId = task.id
+            }
         }
-    }
-
-    private func count(for category: DownloadCategory) -> Int {
-        switch category {
-        case .all: return viewModel.tasks.count
-        case .downloading: return viewModel.tasks.filter { $0.status == .downloading || $0.status == .pending }.count
-        case .completed: return viewModel.tasks.filter { $0.status == .completed }.count
-        case .paused: return viewModel.tasks.filter { $0.status == .paused }.count
-        case .failed: return viewModel.tasks.filter { $0.status == .failed }.count
-        case .video: return viewModel.tasks.filter { ["mp4", "mkv", "mov", "avi", "webm", "ts", "m3u8"].contains(fileExt($0)) }.count
-        case .audio: return viewModel.tasks.filter { ["mp3", "m4a", "flac", "wav", "aac", "ogg"].contains(fileExt($0)) }.count
-        case .compressed: return viewModel.tasks.filter { ["zip", "rar", "7z", "tar", "gz", "bz2", "xz"].contains(fileExt($0)) }.count
-        case .programs: return viewModel.tasks.filter { ["dmg", "pkg", "iso", "app", "exe"].contains(fileExt($0)) }.count
-        case .documents: return viewModel.tasks.filter { ["pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "txt"].contains(fileExt($0)) }.count
-        case .images: return viewModel.tasks.filter { ["jpg", "jpeg", "png", "gif", "webp", "svg"].contains(fileExt($0)) }.count
-        }
-    }
-
-    private func fileExt(_ task: DownloadTask) -> String {
-        URL(fileURLWithPath: task.filename).pathExtension.lowercased()
     }
 }

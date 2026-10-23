@@ -5,8 +5,11 @@ import Darwin
 // guaranteed to fit in one socket write.
 enum SocketFrame {
     static let maximum = 1024 * 1024
-    static func configure(_ fd: Int32) {
-        var timeout = timeval(tv_sec: 40, tv_usec: 0)
+    /// Per-operation socket timeout. The server passes a short idle timeout
+    /// (B8) so a stalled peer cannot pin a handler slot; the default keeps the
+    /// historical 40 s for existing callers.
+    static func configure(_ fd: Int32, timeoutSeconds: Int = 40) {
+        var timeout = timeval(tv_sec: timeoutSeconds, tv_usec: 0)
         setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))
         setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))
         var yes: Int32 = 1

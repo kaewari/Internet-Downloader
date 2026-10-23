@@ -174,7 +174,7 @@ final class NativeHostIntegrationTests: XCTestCase {
         let engine = BrowserTransfers(store:store,slots:DownloadSlots(),destination:root,notify:{})
         let path = root.appendingPathComponent("ipc").path; let server = UnixDomainSocketServer(socketPath:path)
         server.requestHandler = { request in
-            if request.action == "hello" { return IPCResponse(success:request.protocolVersion == 2,extra:["appVersion":"1.1.0","protocolVersion":"2"]) }
+            if request.action == "hello" { return IPCResponse(success:request.protocolVersion == AppVersion.protocolVersion,extra:["appVersion":AppVersion.appVersion,"protocolVersion":"\(AppVersion.protocolVersion)"]) }
             return await engine.command(request)
         }
         try server.start(); defer { server.stop() }
@@ -217,6 +217,25 @@ final class NativeHostIntegrationTests: XCTestCase {
 
 import SQLite3
 final class BrowserMigrationAndValidationTests: XCTestCase {
+    // Resolve ffmpeg: ENV FFMPEG → /opt/homebrew → /usr/local → which. Nil khi thiếu.
+    private func find_ffmpeg() -> String? {
+        let env = ProcessInfo.processInfo.environment
+        if let override = env["FFMPEG"], FileManager.default.isExecutableFile(atPath: override) { return override }
+        for candidate in ["/opt/homebrew/bin/ffmpeg", "/usr/local/bin/ffmpeg", "/usr/bin/ffmpeg"] {
+            if FileManager.default.isExecutableFile(atPath: candidate) { return candidate }
+        }
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: "/usr/bin/which")
+        proc.arguments = ["ffmpeg"]
+        let pipe = Pipe()
+        proc.standardOutput = pipe
+        proc.standardError = FileHandle.nullDevice
+        try? proc.run()
+        proc.waitUntilExit()
+        let found = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return found.isEmpty ? nil : found
+    }
     func testOldSchemaMigratesWithoutChangingExistingRows() throws {
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at:dir,withIntermediateDirectories:true); defer { try? FileManager.default.removeItem(at:dir) }
@@ -236,8 +255,8 @@ final class BrowserMigrationAndValidationTests: XCTestCase {
     func testVideoDecodeAndDurationAndImageDecode() throws {
         let dir=FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at:dir,withIntermediateDirectories:true);defer{try? FileManager.default.removeItem(at:dir)}
-        let binary="/opt/homebrew/bin/ffmpeg"
-        guard FileManager.default.isExecutableFile(atPath:binary) else { throw XCTSkip("ffmpeg unavailable") }
+        let binary = find_ffmpeg()
+        guard let binary, FileManager.default.isExecutableFile(atPath: binary) else { throw XCTSkip("ffmpeg unavailable (FFMPEG → /opt/homebrew → /usr/local → which)") }
         let video=dir.appendingPathComponent("synthetic.mp4")
         let process=Process();process.executableURL=URL(fileURLWithPath:binary);process.standardError=FileHandle.nullDevice;process.standardOutput=FileHandle.nullDevice
         process.arguments=["-v","error","-f","lavfi","-i","testsrc2=size=64x64:rate=10","-t","4","-c:v","libx264","-pix_fmt","yuv420p",video.path]
